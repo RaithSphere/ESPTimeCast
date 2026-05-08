@@ -39,11 +39,18 @@ See LICENSE.txt for full terms.
 #define PIN_EEPROM_SECTOR 1019  // fixed, safe for 4MB flash (0x3FB000)
 EEPROMClass PinStorage(PIN_EEPROM_SECTOR);
 
-// Fallback defaults (Wemos D1 Mini) — only used if EEPROM is blank
-// (manual flash users who skipped the installer)
+// Fallback defaults (Wemos D1 Mini) - only used if EEPROM is blank
+// (manual flash users who skipped the installer).
+// PlatformIO builds can override these with ESPTIMECAST_DEFAULT_* build flags.
+#if defined(ESPTIMECAST_DEFAULT_CLK) && defined(ESPTIMECAST_DEFAULT_CS) && defined(ESPTIMECAST_DEFAULT_DATA)
+#define L_CLK ESPTIMECAST_DEFAULT_CLK
+#define L_CS ESPTIMECAST_DEFAULT_CS
+#define L_DATA ESPTIMECAST_DEFAULT_DATA
+#else
 #define L_CLK 14
 #define L_CS 13
 #define L_DATA 15
+#endif
 
 struct PinConfig {
   uint8_t magic;  // byte 0

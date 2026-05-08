@@ -38,8 +38,14 @@ See LICENSE.txt for full terms.
 
 // ============================
 // LEGACY fallback pins (used ONLY for migration)
+// PlatformIO builds can override these with ESPTIMECAST_DEFAULT_* build flags.
 // ============================
-#if defined(CONFIG_IDF_TARGET_ESP32S2)
+#if defined(ESPTIMECAST_DEFAULT_CLK) && defined(ESPTIMECAST_DEFAULT_CS) && defined(ESPTIMECAST_DEFAULT_DATA)
+#define L_CLK ESPTIMECAST_DEFAULT_CLK
+#define L_CS ESPTIMECAST_DEFAULT_CS
+#define L_DATA ESPTIMECAST_DEFAULT_DATA
+
+#elif defined(CONFIG_IDF_TARGET_ESP32S2)
 #define L_CLK 7
 #define L_CS 11
 #define L_DATA 12

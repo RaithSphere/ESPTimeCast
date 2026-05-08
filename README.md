@@ -408,6 +408,45 @@ Once your IDE is ready:
 **⚠️ Note for existing users:** If you have previously uploaded /data via LittleFS, you can safely skip that step now — the device will manage config files internally.  
 
 &nbsp;
+
+### PlatformIO Installation
+
+ESPTimeCast can also be built from the repository root with PlatformIO.
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/RaithSphere/ESPTimeCast.git
+   cd ESPTimeCast
+   ```
+
+2. Build the default ESP32 Dev Module firmware:
+   ```bash
+   pio run
+   ```
+
+3. Build or upload a specific board environment:
+   ```bash
+   pio run -e esp8266_d1_mini
+   pio run -e esp32dev -t upload
+   ```
+
+Available PlatformIO environments:
+
+| Environment | Target board | CLK | CS | DIN |
+|-------------|--------------|:---:|:--:|:---:|
+| `esp8266_d1_mini` | ESP8266 D1 Mini | 14 | 13 | 15 |
+| `esp8266_esp12f` | ESP12-F / ESP8266MOD | 14 | 13 | 12 |
+| `esp32dev` | ESP32 Dev Module / D1 Mini ESP32 | 18 | 23 | 5 |
+| `esp32_s2_mini` | LOLIN S2 Mini | 7 | 11 | 12 |
+| `esp32_s2_feather` | Adafruit ESP32-S2 Feather | 36 | 10 | 35 |
+| `esp32_c3_supermini` | ESP32-C3 SuperMini | 4 | 10 | 6 |
+| `esp32_s3_wroom` | ESP32-S3 WROOM-1 / DevKitC style board | 18 | 16 | 17 |
+| `esp32_s3_supermini` | ESP32-S3 SuperMini | 4 | 5 | 6 |
+| `esp32_s3_zero` | ESP32-S3-Zero | 12 | 11 | 10 |
+
+No separate filesystem upload is needed. The web interface is embedded in the sketch.
+
+&nbsp;
 </details>
 <details>
 <summary>🏠 API & Home Assistant Integration</summary>
