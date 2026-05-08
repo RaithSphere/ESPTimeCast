@@ -426,16 +426,14 @@ ESPTimeCast can also be built from the repository root with PlatformIO.
 
 3. Build or upload a specific board environment:
    ```bash
-   pio run -e esp8266_d1_mini
+   pio run -e esp32_s2_mini
    pio run -e esp32dev -t upload
    ```
 
-Available PlatformIO environments:
+Available ESP32 PlatformIO environments:
 
 | Environment | Target board | CLK | CS | DIN |
 |-------------|--------------|:---:|:--:|:---:|
-| `esp8266_d1_mini` | ESP8266 D1 Mini | 14 | 13 | 15 |
-| `esp8266_esp12f` | ESP12-F / ESP8266MOD | 14 | 13 | 12 |
 | `esp32dev` | ESP32 Dev Module / D1 Mini ESP32 | 18 | 23 | 5 |
 | `esp32_s2_mini` | LOLIN S2 Mini | 7 | 11 | 12 |
 | `esp32_s2_feather` | Adafruit ESP32-S2 Feather | 36 | 10 | 35 |

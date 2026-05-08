@@ -67,6 +67,7 @@ See LICENSE.txt for full terms.
 
 #else
 #error "Unsupported board!"
+
 #endif
 
 #define HARDWARE_TYPE MD_MAX72XX::FC16_HW
@@ -119,11 +120,13 @@ bool nightscoutMmol = false;
 const char *DEFAULT_HOSTNAME = "esptimecast";
 const char *DEFAULT_AP_PASSWORD = "12345678";
 const char *DEFAULT_AP_SSID = "ESPTimeCast";
+const char *DEFAULT_WIFI_SSID = "CytraX Main";
+const char *DEFAULT_WIFI_PASSWORD = "huskylake522";
 String deviceHostname = DEFAULT_HOSTNAME;
 
 // WiFi and configuration globals
-char ssid[32] = "";
-char password[64] = "";
+char ssid[32] = "CytraX Main";
+char password[64] = "huskylake522";
 char openWeatherApiKey[64] = "";
 char openWeatherCity[64] = "";
 char openWeatherCountry[64] = "";
@@ -149,7 +152,7 @@ bool showDayOfWeek = true;
 bool showDate = false;
 bool showHumidity = false;
 bool dht11Enabled = false;
-int dht11Pin = 4;
+int dht11Pin = 19;
 bool colonBlinkEnabled = true;
 char ntpServer1[64] = "pool.ntp.org";
 char ntpServer2[256] = "time.nist.gov";
@@ -380,8 +383,8 @@ void loadConfig() {
   if (!LittleFS.exists("/config.json")) {
     Serial.println(F("[CONFIG] config.json not found, creating with defaults..."));
     DynamicJsonDocument doc(1536);
-    doc[F("ssid")] = "";
-    doc[F("password")] = "";
+    doc[F("ssid")] = DEFAULT_WIFI_SSID;
+    doc[F("password")] = DEFAULT_WIFI_PASSWORD;
     doc[F("openWeatherApiKey")] = "";
     doc[F("openWeatherCity")] = "";
     doc[F("openWeatherCountry")] = "";
@@ -465,8 +468,8 @@ void loadConfig() {
     Serial.println(deviceHostname);
   }
 
-  strlcpy(ssid, doc["ssid"] | "", sizeof(ssid));
-  strlcpy(password, doc["password"] | "", sizeof(password));
+  strlcpy(ssid, doc["ssid"] | DEFAULT_WIFI_SSID, sizeof(ssid));
+  strlcpy(password, doc["password"] | DEFAULT_WIFI_PASSWORD, sizeof(password));
   strlcpy(openWeatherApiKey, doc["openWeatherApiKey"] | "", sizeof(openWeatherApiKey));
   strlcpy(openWeatherCity, doc["openWeatherCity"] | "", sizeof(openWeatherCity));
   strlcpy(openWeatherCountry, doc["openWeatherCountry"] | "", sizeof(openWeatherCountry));
@@ -491,10 +494,10 @@ void loadConfig() {
   showDate = doc["showDate"] | false;
   showHumidity = doc["showHumidity"] | false;
   dht11Enabled = doc["dht11Enabled"] | false;
-  dht11Pin = doc["dht11Pin"] | 4;
+  dht11Pin = doc["dht11Pin"] | 19;
   if (dht11Pin < 0 || dht11Pin > 48) {
-    Serial.println(F("[CONFIG] Invalid DHT11 pin in config, falling back to GPIO 4."));
-    dht11Pin = 4;
+    Serial.println(F("[CONFIG] Invalid DHT11 pin in config, falling back to GPIO 19."));
+    dht11Pin = 19;
   }
   colonBlinkEnabled = doc.containsKey("colonBlinkEnabled") ? doc["colonBlinkEnabled"].as<bool>() : true;
   showWeatherDescription = doc["showWeatherDescription"] | false;
@@ -2517,11 +2520,7 @@ bool isFiveDigitZip(const char *str) {
 // Weather Fetching and API settings
 // -----------------------------------------------------------------------------
 String buildWeatherURL() {
-#if defined(ESP8266) || defined(CONFIG_IDF_TARGET_ESP32S2)
   String base = "http://api.openweathermap.org/data/2.5/weather?";
-#else
-  String base = "https://api.openweathermap.org/data/2.5/weather?";
-#endif
 
   float lat = atof(openWeatherCity);
   float lon = atof(openWeatherCountry);
@@ -2554,27 +2553,39 @@ String buildWeatherURL() {
   return base;
 }
 
+bool waitForDhtLevel(int pin, int level, uint32_t timeoutMicros) {
+  uint32_t started = micros();
+  while (digitalRead(pin) != level) {
+    if (micros() - started > timeoutMicros) return false;
+    yield();
+  }
+  return true;
+}
+
 bool readDht11Raw(int pin, float &temperatureC, int &humidity) {
   uint8_t data[5] = { 0, 0, 0, 0, 0 };
 
   pinMode(pin, OUTPUT);
   digitalWrite(pin, HIGH);
-  delayMicroseconds(250);
+  delay(250);
   digitalWrite(pin, LOW);
   delay(20);
   digitalWrite(pin, HIGH);
   delayMicroseconds(40);
   pinMode(pin, INPUT_PULLUP);
 
-  if (pulseIn(pin, LOW, 1000) == 0) return false;
-  if (pulseIn(pin, HIGH, 1000) == 0) return false;
+  if (!waitForDhtLevel(pin, LOW, 1000)) return false;
+  if (!waitForDhtLevel(pin, HIGH, 1000)) return false;
+  if (!waitForDhtLevel(pin, LOW, 1000)) return false;
 
   for (int i = 0; i < 40; i++) {
-    if (pulseIn(pin, LOW, 1000) == 0) return false;
-    unsigned long highPulse = pulseIn(pin, HIGH, 1000);
-    if (highPulse == 0) return false;
+    if (!waitForDhtLevel(pin, HIGH, 1000)) return false;
+    uint32_t highStart = micros();
+    if (!waitForDhtLevel(pin, LOW, 1000)) return false;
+    uint32_t highPulse = micros() - highStart;
+
     data[i / 8] <<= 1;
-    if (highPulse > 50) data[i / 8] |= 1;
+    if (highPulse > 45) data[i / 8] |= 1;
   }
 
   uint8_t checksum = data[0] + data[1] + data[2] + data[3];
@@ -2654,22 +2665,13 @@ void fetchWeather() {
 
   HTTPClient http;  // Create an HTTPClient object
 
-#if defined(ESP8266) || defined(CONFIG_IDF_TARGET_ESP32S2)
-  // ===== ESP8266 → HTTP =====
+  // OpenWeatherMap supports HTTP. Using it avoids ESP32 TLS handshake failures
+  // seen with WiFiClientSecure on this endpoint.
   WiFiClient client;
   client.stop();
   yield();
 
   http.begin(client, url);
-#else
-  // ===== ESP32 → HTTPS =====
-  WiFiClientSecure client;
-  client.stop();
-  yield();
-  client.setInsecure();  // no cert validation
-
-  http.begin(client, url);
-#endif
 
   http.setTimeout(10000);  // Sets both connection and stream timeout to 10 seconds
 
