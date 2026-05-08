@@ -1301,6 +1301,31 @@ const char index_html[] PROGMEM = R"rawliteral(
                   <span class="toggle-slider"></span>
                 </span>
               </label>
+
+              <label class="toggle-row-lg">
+                <span class="label-text">Indoor DHT11 Screen:</span>
+                <span class="toggle-switch">
+                  <input
+                    type="checkbox"
+                    id="dht11Enabled"
+                    name="dht11Enabled"
+                  />
+                  <span class="toggle-slider"></span>
+                </span>
+              </label>
+
+              <label for="dht11Pin">DHT11 GPIO Pin</label>
+              <input
+                type="number"
+                id="dht11Pin"
+                name="dht11Pin"
+                min="0"
+                max="48"
+                value="4"
+              />
+              <div class="small">
+                Use an unused GPIO with the DHT11 data pin pulled up to 3.3V.
+              </div>
             </div>
           </div>
         </div>
@@ -1684,6 +1709,9 @@ const char index_html[] PROGMEM = R"rawliteral(
             document.getElementById("showDate").checked = !!data.showDate;
             document.getElementById("showHumidity").checked =
               !!data.showHumidity;
+            document.getElementById("dht11Enabled").checked =
+              !!data.dht11Enabled;
+            document.getElementById("dht11Pin").value = data.dht11Pin || 4;
             document.getElementById("colonBlinkEnabled").checked =
               !!data.colonBlinkEnabled;
             document.getElementById("showWeatherDescription").checked =
@@ -1933,6 +1961,11 @@ const char index_html[] PROGMEM = R"rawliteral(
           "showHumidity",
           document.getElementById("showHumidity").checked ? "on" : "",
         );
+        formData.set(
+          "dht11Enabled",
+          document.getElementById("dht11Enabled").checked ? "on" : "",
+        );
+        formData.set("dht11Pin", document.getElementById("dht11Pin").value);
         formData.set(
           "colonBlinkEnabled",
           document.getElementById("colonBlinkEnabled").checked ? "on" : "",

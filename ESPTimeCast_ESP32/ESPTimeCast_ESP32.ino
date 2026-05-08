@@ -88,6 +88,7 @@ int messageScrollSpeed = 85;          // default fallback
 const uint8_t modeOrder[] = {
   0,  // CLOCK
   1,  // WEATHER
+  8,  // INDOOR
   5,  // DATE
   2,  // WEATHER DESCRIPTION
   3,  // COUNTDOWN
@@ -141,6 +142,8 @@ bool twelveHourToggle = false;
 bool showDayOfWeek = true;
 bool showDate = false;
 bool showHumidity = false;
+bool dht11Enabled = false;
+int dht11Pin = 4;
 bool colonBlinkEnabled = true;
 char ntpServer1[64] = "pool.ntp.org";
 char ntpServer2[256] = "time.nist.gov";
@@ -212,11 +215,17 @@ bool shouldFetchWeatherNow = false;
 
 unsigned long lastSwitch = 0;
 unsigned long lastColonBlink = 0;
-int displayMode = 0;  // 0: Clock, 1: Weather, 2: Weather Description, 3: Countdown
+int displayMode = 0;  // See DisplayMode key near setup().
 int prevDisplayMode = -1;
 bool clockScrollDone = false;
 int currentHumidity = -1;
 bool ntpSyncSuccessful = false;
+
+bool dht11Available = false;
+float dht11TemperatureC = NAN;
+int dht11Humidity = -1;
+unsigned long lastDht11Read = 0;
+const unsigned long DHT11_READ_INTERVAL = 2500;
 
 // NTP Synchronization State Machine
 enum NtpState {
@@ -299,6 +308,22 @@ void advanceDisplayMode(bool forced = false);
 void previousDisplayMode(bool forced = false);
 void goToMode(const String &target);
 bool handlePomodoroCommand(String cmd);
+void updateDht11Reading(bool force = false);
+
+const char *getModeName(int mode) {
+  switch (mode) {
+    case 0: return "CLOCK";
+    case 1: return "WEATHER";
+    case 2: return "WEATHER DESC";
+    case 3: return "COUNTDOWN";
+    case 4: return "NIGHTSCOUT";
+    case 5: return "DATE";
+    case 6: return "CUSTOM MESSAGE";
+    case 7: return "TIMER";
+    case 8: return "INDOOR";
+    default: return "UNKNOWN";
+  }
+}
 
 // --- Safe WiFi credential and API getters ---
 const char *getSafeSsid() {
@@ -348,7 +373,7 @@ void loadConfig() {
   // Check if config.json exists, if not, create default
   if (!LittleFS.exists("/config.json")) {
     Serial.println(F("[CONFIG] config.json not found, creating with defaults..."));
-    DynamicJsonDocument doc(1024);
+    DynamicJsonDocument doc(1536);
     doc[F("ssid")] = "";
     doc[F("password")] = "";
     doc[F("openWeatherApiKey")] = "";
@@ -365,6 +390,8 @@ void loadConfig() {
     doc[F("showDayOfWeek")] = showDayOfWeek;
     doc[F("showDate")] = false;
     doc[F("showHumidity")] = showHumidity;
+    doc[F("dht11Enabled")] = false;
+    doc[F("dht11Pin")] = dht11Pin;
     doc[F("colonBlinkEnabled")] = colonBlinkEnabled;
     doc[F("ntpServer1")] = ntpServer1;
     doc[F("ntpServer2")] = ntpServer2;
@@ -414,7 +441,7 @@ void loadConfig() {
     return;
   }
 
-  DynamicJsonDocument doc(1024);  // Size based on ArduinoJson Assistant + buffer
+  DynamicJsonDocument doc(2048);  // Size based on ArduinoJson Assistant + buffer
   DeserializationError error = deserializeJson(doc, configFile);
   configFile.close();
 
@@ -457,6 +484,12 @@ void loadConfig() {
   showDayOfWeek = doc["showDayOfWeek"] | true;
   showDate = doc["showDate"] | false;
   showHumidity = doc["showHumidity"] | false;
+  dht11Enabled = doc["dht11Enabled"] | false;
+  dht11Pin = doc["dht11Pin"] | 4;
+  if (dht11Pin < 0 || dht11Pin > 48) {
+    Serial.println(F("[CONFIG] Invalid DHT11 pin in config, falling back to GPIO 4."));
+    dht11Pin = 4;
+  }
   colonBlinkEnabled = doc.containsKey("colonBlinkEnabled") ? doc["colonBlinkEnabled"].as<bool>() : true;
   showWeatherDescription = doc["showWeatherDescription"] | false;
 
@@ -563,6 +596,13 @@ void loadConfig() {
     doc["nextDonationTime"] = 0;
     configChanged = true;
     Serial.println(F("[CONFIG] Migrated: existing user detected, hideDonationMsg set to true."));
+  }
+
+  if (!doc.containsKey("dht11Enabled")) {
+    doc["dht11Enabled"] = dht11Enabled;
+    doc["dht11Pin"] = dht11Pin;
+    configChanged = true;
+    Serial.println(F("[CONFIG] Migrated: added DHT11 indoor sensor defaults."));
   }
 
   // --- Save migrated config if needed ---
@@ -1276,7 +1316,7 @@ void setupWebServer() {
       request->send(500, "application/json", "{\"error\":\"Failed to open config.json\"}");
       return;
     }
-    DynamicJsonDocument doc(2048);
+    DynamicJsonDocument doc(3072);
     DeserializationError err = deserializeJson(doc, f);
     f.close();
     if (err) {
@@ -1299,7 +1339,7 @@ void setupWebServer() {
 
   server.on("/save", HTTP_POST, [](AsyncWebServerRequest *request) {
     Serial.println(F("[WEBSERVER] Request: /save"));
-    DynamicJsonDocument doc(2048);
+    DynamicJsonDocument doc(3072);
 
     File configFile = LittleFS.open("/config.json", "r");
     if (configFile) {
@@ -1327,6 +1367,8 @@ void setupWebServer() {
       else if (n == "showDayOfWeek") doc[n] = (v == "true" || v == "on" || v == "1");
       else if (n == "showDate") doc[n] = (v == "true" || v == "on" || v == "1");
       else if (n == "showHumidity") doc[n] = (v == "true" || v == "on" || v == "1");
+      else if (n == "dht11Enabled") doc[n] = (v == "true" || v == "on" || v == "1");
+      else if (n == "dht11Pin") doc[n] = v.toInt();
       else if (n == "colonBlinkEnabled") doc[n] = (v == "true" || v == "on" || v == "1");
       else if (n == "dimStartHour") doc[n] = v.toInt();
       else if (n == "dimStartMinute") doc[n] = v.toInt();
@@ -1444,7 +1486,7 @@ void setupWebServer() {
     }
     verify.seek(0);
 
-    DynamicJsonDocument test(2048);
+    DynamicJsonDocument test(3072);
     DeserializationError err = deserializeJson(test, verify);
     verify.close();
 
@@ -1735,7 +1777,7 @@ void setupWebServer() {
   });
 
   server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request) {
-    DynamicJsonDocument doc(1536);
+    DynamicJsonDocument doc(3072);
 
     // --- Identity ---
     doc["id"] = deviceHostname;
@@ -1763,6 +1805,7 @@ void setupWebServer() {
       case 5: doc["mode"] = "date"; break;
       case 6: doc["mode"] = "message"; break;
       case 7: doc["mode"] = "timer"; break;
+      case 8: doc["mode"] = "indoor"; break;
       default: doc["mode"] = "cycling"; break;
     }
 
@@ -1818,6 +1861,24 @@ void setupWebServer() {
     weather["sunsetHour"] = weatherAvailable ? sunsetHour : JsonVariant();
     weather["sunsetMinute"] = weatherAvailable ? sunsetMinute : JsonVariant();
 
+    JsonObject indoor = doc.createNestedObject("indoor");
+    indoor["enabled"] = dht11Enabled;
+    indoor["pin"] = dht11Pin;
+    indoor["available"] = dht11Available;
+    if (dht11Available) {
+      indoor["temperatureC"] = dht11TemperatureC;
+      indoor["temperature"] = (strcmp(weatherUnits, "imperial") == 0)
+                                  ? (int)round((dht11TemperatureC * 9.0 / 5.0) + 32.0)
+                                  : (int)round(dht11TemperatureC);
+      indoor["humidity"] = dht11Humidity;
+      indoor["units"] = String(weatherUnits);
+    } else {
+      indoor["temperatureC"] = JsonVariant();
+      indoor["temperature"] = JsonVariant();
+      indoor["humidity"] = JsonVariant();
+      indoor["units"] = String(weatherUnits);
+    }
+
     // --- Nightscout info ---
 #if defined(ESP32) || defined(ESP8266)
     JsonObject ns = doc.createNestedObject("nightscout");
@@ -1854,6 +1915,8 @@ void setupWebServer() {
     config["twelveHourToggle"] = twelveHourToggle;
     config["showDate"] = showDate;
     config["showHumidity"] = showHumidity;
+    config["dht11Enabled"] = dht11Enabled;
+    config["dht11Pin"] = dht11Pin;
     config["ntpServer1"] = String(ntpServer1);
 
     String nsUrl = String(ntpServer2);
@@ -2483,6 +2546,73 @@ String buildWeatherURL() {
   base += "&lang=" + langForAPI;
 
   return base;
+}
+
+bool readDht11Raw(int pin, float &temperatureC, int &humidity) {
+  uint8_t data[5] = { 0, 0, 0, 0, 0 };
+
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, HIGH);
+  delayMicroseconds(250);
+  digitalWrite(pin, LOW);
+  delay(20);
+  digitalWrite(pin, HIGH);
+  delayMicroseconds(40);
+  pinMode(pin, INPUT_PULLUP);
+
+  if (pulseIn(pin, LOW, 1000) == 0) return false;
+  if (pulseIn(pin, HIGH, 1000) == 0) return false;
+
+  for (int i = 0; i < 40; i++) {
+    if (pulseIn(pin, LOW, 1000) == 0) return false;
+    unsigned long highPulse = pulseIn(pin, HIGH, 1000);
+    if (highPulse == 0) return false;
+    data[i / 8] <<= 1;
+    if (highPulse > 50) data[i / 8] |= 1;
+  }
+
+  uint8_t checksum = data[0] + data[1] + data[2] + data[3];
+  if (checksum != data[4]) return false;
+
+  humidity = data[0];
+  temperatureC = data[2];
+  if (data[3] != 0) {
+    temperatureC += data[3] / 10.0;
+  }
+  return humidity >= 0 && humidity <= 100 && temperatureC > -20 && temperatureC < 80;
+}
+
+String formatIndoorTemperature() {
+  float displayTemp = dht11TemperatureC;
+  if (strcmp(weatherUnits, "imperial") == 0) {
+    displayTemp = (displayTemp * 9.0 / 5.0) + 32.0;
+  }
+  return String((int)round(displayTemp)) + String((char)176);
+}
+
+void updateDht11Reading(bool force) {
+  if (!dht11Enabled) {
+    dht11Available = false;
+    dht11Humidity = -1;
+    return;
+  }
+
+  unsigned long now = millis();
+  if (!force && now - lastDht11Read < DHT11_READ_INTERVAL) return;
+  lastDht11Read = now;
+
+  float temperatureC;
+  int humidity;
+  if (readDht11Raw(dht11Pin, temperatureC, humidity)) {
+    dht11TemperatureC = temperatureC;
+    dht11Humidity = humidity;
+    dht11Available = true;
+    Serial.printf("[DHT11] Indoor: %.1fC %d%% on GPIO %d\n", dht11TemperatureC, dht11Humidity, dht11Pin);
+  } else {
+    dht11Available = false;
+    dht11Humidity = -1;
+    Serial.printf("[DHT11] Read failed on GPIO %d\n", dht11Pin);
+  }
 }
 
 
@@ -3428,6 +3558,7 @@ void goToMode(const String &target) {
   else if (v == "5" || v == "date") targetMode = 5;
   else if (v == "6" || v == "message") targetMode = 6;
   else if (v == "7" || v == "timer") targetMode = 7;
+  else if (v == "8" || v == "indoor") targetMode = 8;
 
   if (targetMode == -1 || !isModeAvailable(targetMode)) {
     Serial.printf("[DISPLAY] go_to_mode: invalid or unavailable target '%s'\n", target.c_str());
@@ -3483,8 +3614,7 @@ void goToMode(const String &target) {
   descScrolling = false;
   descScrollEndTime = 0;
 
-  const char *modeNames[] = { "CLOCK", "WEATHER", "WEATHER DESC", "COUNTDOWN", "NIGHTSCOUT", "DATE", "CUSTOM MESSAGE", "TIMER" };
-  Serial.printf("[DISPLAY] go_to_mode: %s (from %s)\n", modeNames[targetMode], modeNames[prevDisplayMode]);
+  Serial.printf("[DISPLAY] go_to_mode: %s (from %s)\n", getModeName(targetMode), getModeName(prevDisplayMode));
   lastSwitch = millis();
 }
 
@@ -3572,6 +3702,7 @@ DisplayMode key:
   4: Nightscout
   5: Date
   6: Custom Message
+  8: Indoor (DHT11)
 */
 void setup() {
   // pinMode(BUTTON_PIN, INPUT_PULLUP);  // ← Uncomment if using button
@@ -3602,6 +3733,7 @@ void setup() {
   P.setCharSpacing(0);
   P.setFont(mFactory);
   loadConfig();
+  updateDht11Reading(true);
   P.setIntensity(brightness);
   if (displayOff) {
     P.displayShutdown(true);
@@ -3756,10 +3888,7 @@ void advanceDisplayMode(bool forced) {
 
       displayMode = nextMode;
 
-      const char *modeNames[] = { "CLOCK", "WEATHER", "WEATHER DESC", "COUNTDOWN", "NIGHTSCOUT", "DATE", "CUSTOM MESSAGE", "TIMER" };
-      const char *newName = displayMode < 8 ? modeNames[displayMode] : "UNKNOWN";
-      const char *prevName = prevDisplayMode < 8 ? modeNames[prevDisplayMode] : "UNKNOWN";
-      Serial.printf("[DISPLAY] Switching to display mode: %s (from %s)\n", newName, prevName);
+      Serial.printf("[DISPLAY] Switching to display mode: %s (from %s)\n", getModeName(displayMode), getModeName(prevDisplayMode));
 
       clockScrollDone = false;
       descScrolling = false;
@@ -3811,10 +3940,7 @@ void previousDisplayMode(bool forced) {
 
       displayMode = nextMode;
 
-      const char *modeNames[] = { "CLOCK", "WEATHER", "WEATHER DESC", "COUNTDOWN", "NIGHTSCOUT", "DATE", "CUSTOM MESSAGE", "TIMER" };
-      const char *newName = displayMode < 8 ? modeNames[displayMode] : "UNKNOWN";
-      const char *prevName = prevDisplayMode < 8 ? modeNames[prevDisplayMode] : "UNKNOWN";
-      Serial.printf("[DISPLAY] Switching to display mode: %s (from %s)\n", newName, prevName);
+      Serial.printf("[DISPLAY] Switching to display mode: %s (from %s)\n", getModeName(displayMode), getModeName(prevDisplayMode));
 
       clockScrollDone = false;
       descScrolling = false;
@@ -3840,6 +3966,7 @@ bool isModeAvailable(int mode) {
     case 4: return nightscoutConfigured;
     case 5: return showDate;
     case 6: return strlen(customMessage) > 0;
+    case 8: return dht11Enabled && dht11Available;
   }
   return false;
 }
@@ -3913,6 +4040,8 @@ bool saveConfigRuntime() {
   doc["showDayOfWeek"] = showDayOfWeek;
   doc["showDate"] = showDate;
   doc["showHumidity"] = showHumidity;
+  doc["dht11Enabled"] = dht11Enabled;
+  doc["dht11Pin"] = dht11Pin;
   doc["colonBlinkEnabled"] = colonBlinkEnabled;
   doc["clockOnlyDuringDimming"] = clockOnlyDuringDimming;
   doc["hideDonationMsg"] = hideDonationMsg;
@@ -4342,9 +4471,9 @@ void loop() {
   }
 
 
-  // Only advance mode by timer for clock/weather, not description!
+  // Only advance mode by timer for static clock/weather/indoor screens, not description!
   unsigned long displayDuration = (displayMode == 0) ? clockDuration : weatherDuration;
-  if (rotationEnabled && (displayMode == 0 || displayMode == 1) && millis() - lastSwitch > displayDuration) {
+  if (rotationEnabled && (displayMode == 0 || displayMode == 1 || displayMode == 8) && millis() - lastSwitch > displayDuration) {
     advanceDisplayMode();
   }
 
@@ -4355,6 +4484,8 @@ void loop() {
       triggerDonationMessage();
     }
   }
+
+  updateDht11Reading();
 
   // --- MODIFIED WEATHER FETCHING LOGIC ---
   if (WiFi.status() == WL_CONNECTED) {
@@ -4438,13 +4569,13 @@ void loop() {
   unsigned long currentDisplayDuration = 0;
   if (displayMode == 0) {
     currentDisplayDuration = clockDuration;
-  } else if (displayMode == 1) {  // Weather
+  } else if (displayMode == 1 || displayMode == 8) {  // Weather / Indoor
     currentDisplayDuration = weatherDuration;
   }
 
-  // Only advance mode by timer for clock/weather static (Mode 0 & 1).
+  // Only advance mode by timer for clock/weather/indoor static screens.
   // Other modes (2, 3) have their own internal timers/conditions for advancement.
-  if (rotationEnabled && (displayMode == 0 || displayMode == 1) && (millis() - lastSwitch > currentDisplayDuration)) {
+  if (rotationEnabled && (displayMode == 0 || displayMode == 1 || displayMode == 8) && (millis() - lastSwitch > currentDisplayDuration)) {
     advanceDisplayMode();
   }
 
@@ -4575,6 +4706,44 @@ void loop() {
       if (weatherWasAvailable) {
         Serial.println(F("[DISPLAY] Weather not available, showing clock..."));
         weatherWasAvailable = false;
+      }
+      if (ntpSyncSuccessful) {
+        String timeString = formattedTime;
+        if (!colonVisible) timeString.replace(":", " ");
+        P.setCharSpacing(0);
+        P.print(timeString);
+      } else {
+        P.setCharSpacing(0);
+        P.setTextAlignment(PA_CENTER);
+        P.write(1);
+      }
+    }
+    yield();
+    return;
+  }
+
+  // --- INDOOR Display Mode (DHT11) ---
+  static bool indoorWasAvailable = false;
+  if (displayMode == 8) {
+    if (forceMessageRestart) return;
+    updateDht11Reading();
+    P.setCharSpacing(1);
+    P.setTextAlignment(PA_CENTER);
+
+    if (dht11Available) {
+      String indoorDisplay = "I" + formatIndoorTemperature();
+      if (dht11Humidity != -1) {
+        int cappedHumidity = (dht11Humidity > 99) ? 99 : dht11Humidity;
+        indoorDisplay += " " + String(cappedHumidity) + "%";
+      } else {
+        indoorDisplay += tempSymbol;
+      }
+      P.print(indoorDisplay.c_str());
+      indoorWasAvailable = true;
+    } else {
+      if (indoorWasAvailable) {
+        Serial.println(F("[DISPLAY] Indoor sensor not available, showing clock..."));
+        indoorWasAvailable = false;
       }
       if (ntpSyncSuccessful) {
         String timeString = formattedTime;
