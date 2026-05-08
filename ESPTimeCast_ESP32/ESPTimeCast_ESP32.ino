@@ -153,6 +153,7 @@ bool showDate = false;
 bool showHumidity = false;
 bool dht11Enabled = false;
 int dht11Pin = 19;
+float dht11TemperatureOffsetC = 8.0;
 bool colonBlinkEnabled = true;
 char ntpServer1[64] = "pool.ntp.org";
 char ntpServer2[256] = "time.nist.gov";
@@ -231,6 +232,7 @@ int currentHumidity = -1;
 bool ntpSyncSuccessful = false;
 
 bool dht11Available = false;
+float dht11RawTemperatureC = NAN;
 float dht11TemperatureC = NAN;
 int dht11Humidity = -1;
 unsigned long lastDht11Read = 0;
@@ -401,6 +403,7 @@ void loadConfig() {
     doc[F("showHumidity")] = showHumidity;
     doc[F("dht11Enabled")] = false;
     doc[F("dht11Pin")] = dht11Pin;
+    doc[F("dht11TemperatureOffsetC")] = dht11TemperatureOffsetC;
     doc[F("colonBlinkEnabled")] = colonBlinkEnabled;
     doc[F("ntpServer1")] = ntpServer1;
     doc[F("ntpServer2")] = ntpServer2;
@@ -495,9 +498,14 @@ void loadConfig() {
   showHumidity = doc["showHumidity"] | false;
   dht11Enabled = doc["dht11Enabled"] | false;
   dht11Pin = doc["dht11Pin"] | 19;
+  dht11TemperatureOffsetC = doc["dht11TemperatureOffsetC"] | 8.0;
   if (dht11Pin < 0 || dht11Pin > 48) {
     Serial.println(F("[CONFIG] Invalid DHT11 pin in config, falling back to GPIO 19."));
     dht11Pin = 19;
+  }
+  if (dht11TemperatureOffsetC < -20.0 || dht11TemperatureOffsetC > 20.0) {
+    Serial.println(F("[CONFIG] Invalid DHT11 temperature offset, falling back to +8.0C."));
+    dht11TemperatureOffsetC = 8.0;
   }
   colonBlinkEnabled = doc.containsKey("colonBlinkEnabled") ? doc["colonBlinkEnabled"].as<bool>() : true;
   showWeatherDescription = doc["showWeatherDescription"] | false;
@@ -610,8 +618,14 @@ void loadConfig() {
   if (!doc.containsKey("dht11Enabled")) {
     doc["dht11Enabled"] = dht11Enabled;
     doc["dht11Pin"] = dht11Pin;
+    doc["dht11TemperatureOffsetC"] = dht11TemperatureOffsetC;
     configChanged = true;
     Serial.println(F("[CONFIG] Migrated: added DHT11 indoor sensor defaults."));
+  }
+  if (!doc.containsKey("dht11TemperatureOffsetC")) {
+    doc["dht11TemperatureOffsetC"] = dht11TemperatureOffsetC;
+    configChanged = true;
+    Serial.println(F("[CONFIG] Migrated: added DHT11 temperature calibration offset."));
   }
 
   // --- Save migrated config if needed ---
@@ -1378,6 +1392,7 @@ void setupWebServer() {
       else if (n == "showHumidity") doc[n] = (v == "true" || v == "on" || v == "1");
       else if (n == "dht11Enabled") doc[n] = (v == "true" || v == "on" || v == "1");
       else if (n == "dht11Pin") doc[n] = v.toInt();
+      else if (n == "dht11TemperatureOffsetC") doc[n] = constrain(v.toFloat(), -20.0f, 20.0f);
       else if (n == "colonBlinkEnabled") doc[n] = (v == "true" || v == "on" || v == "1");
       else if (n == "dimStartHour") doc[n] = v.toInt();
       else if (n == "dimStartMinute") doc[n] = v.toInt();
@@ -1873,8 +1888,10 @@ void setupWebServer() {
     JsonObject indoor = doc.createNestedObject("indoor");
     indoor["enabled"] = dht11Enabled;
     indoor["pin"] = dht11Pin;
+    indoor["temperatureOffsetC"] = dht11TemperatureOffsetC;
     indoor["available"] = dht11Available;
     if (dht11Available) {
+      indoor["rawTemperatureC"] = dht11RawTemperatureC;
       indoor["temperatureC"] = dht11TemperatureC;
       indoor["temperature"] = (strcmp(weatherUnits, "imperial") == 0)
                                   ? (int)round((dht11TemperatureC * 9.0 / 5.0) + 32.0)
@@ -1882,6 +1899,7 @@ void setupWebServer() {
       indoor["humidity"] = dht11Humidity;
       indoor["units"] = String(weatherUnits);
     } else {
+      indoor["rawTemperatureC"] = JsonVariant();
       indoor["temperatureC"] = JsonVariant();
       indoor["temperature"] = JsonVariant();
       indoor["humidity"] = JsonVariant();
@@ -1926,6 +1944,7 @@ void setupWebServer() {
     config["showHumidity"] = showHumidity;
     config["dht11Enabled"] = dht11Enabled;
     config["dht11Pin"] = dht11Pin;
+    config["dht11TemperatureOffsetC"] = dht11TemperatureOffsetC;
     config["ntpServer1"] = String(ntpServer1);
 
     String nsUrl = String(ntpServer2);
@@ -2610,6 +2629,7 @@ String formatIndoorTemperature() {
 void updateDht11Reading(bool force) {
   if (!dht11Enabled) {
     dht11Available = false;
+    dht11RawTemperatureC = NAN;
     dht11Humidity = -1;
     return;
   }
@@ -2621,12 +2641,15 @@ void updateDht11Reading(bool force) {
   float temperatureC;
   int humidity;
   if (readDht11Raw(dht11Pin, temperatureC, humidity)) {
-    dht11TemperatureC = temperatureC;
+    dht11RawTemperatureC = temperatureC;
+    dht11TemperatureC = temperatureC + dht11TemperatureOffsetC;
     dht11Humidity = humidity;
     dht11Available = true;
-    Serial.printf("[DHT11] Indoor: %.1fC %d%% on GPIO %d\n", dht11TemperatureC, dht11Humidity, dht11Pin);
+    Serial.printf("[DHT11] Indoor: %.1fC raw, %.1fC calibrated (%+.1fC), %d%% on GPIO %d\n",
+                  dht11RawTemperatureC, dht11TemperatureC, dht11TemperatureOffsetC, dht11Humidity, dht11Pin);
   } else {
     dht11Available = false;
+    dht11RawTemperatureC = NAN;
     dht11Humidity = -1;
     Serial.printf("[DHT11] Read failed on GPIO %d\n", dht11Pin);
   }
@@ -4050,6 +4073,7 @@ bool saveConfigRuntime() {
   doc["showHumidity"] = showHumidity;
   doc["dht11Enabled"] = dht11Enabled;
   doc["dht11Pin"] = dht11Pin;
+  doc["dht11TemperatureOffsetC"] = dht11TemperatureOffsetC;
   doc["colonBlinkEnabled"] = colonBlinkEnabled;
   doc["clockOnlyDuringDimming"] = clockOnlyDuringDimming;
   doc["hideDonationMsg"] = hideDonationMsg;

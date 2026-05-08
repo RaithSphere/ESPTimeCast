@@ -1321,10 +1321,24 @@ const char index_html[] PROGMEM = R"rawliteral(
                 name="dht11Pin"
                 min="0"
                 max="48"
-                value="4"
+                value="19"
               />
               <div class="small">
                 Use an unused GPIO with the DHT11 data pin pulled up to 3.3V.
+              </div>
+
+              <label for="dht11TemperatureOffsetC">DHT11 Temperature Offset (°C)</label>
+              <input
+                type="number"
+                id="dht11TemperatureOffsetC"
+                name="dht11TemperatureOffsetC"
+                min="-20"
+                max="20"
+                step="0.1"
+                value="8"
+              />
+              <div class="small">
+                Adds this calibration value to the raw indoor temperature reading.
               </div>
             </div>
           </div>
@@ -1718,7 +1732,9 @@ const char index_html[] PROGMEM = R"rawliteral(
               !!data.showHumidity;
             document.getElementById("dht11Enabled").checked =
               !!data.dht11Enabled;
-            document.getElementById("dht11Pin").value = data.dht11Pin || 4;
+            document.getElementById("dht11Pin").value = data.dht11Pin || 19;
+            document.getElementById("dht11TemperatureOffsetC").value =
+              data.dht11TemperatureOffsetC ?? 8;
             document.getElementById("colonBlinkEnabled").checked =
               !!data.colonBlinkEnabled;
             document.getElementById("showWeatherDescription").checked =
@@ -1973,6 +1989,10 @@ const char index_html[] PROGMEM = R"rawliteral(
           document.getElementById("dht11Enabled").checked ? "on" : "",
         );
         formData.set("dht11Pin", document.getElementById("dht11Pin").value);
+        formData.set(
+          "dht11TemperatureOffsetC",
+          document.getElementById("dht11TemperatureOffsetC").value,
+        );
         formData.set(
           "colonBlinkEnabled",
           document.getElementById("colonBlinkEnabled").checked ? "on" : "",
