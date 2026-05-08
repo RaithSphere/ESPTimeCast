@@ -1569,15 +1569,22 @@ const char index_html[] PROGMEM = R"rawliteral(
                   onclick="checkUpdate()"
                   class="primary-button cmsg1"
                 >
-                  Check for Updates
+                  Firmware Upload
                 </button>
                 <div id="ota-update-found" style="display: none">
+                  <input
+                    type="file"
+                    id="ota-file"
+                    accept=".bin,application/octet-stream"
+                    onchange="handleOtaFileSelected()"
+                    style="width: 100%; margin: 0.75rem 0; color: rgba(255,255,255,0.85);"
+                  />
                   <button
                     type="button"
                     onclick="performUpdate()"
                     class="primary-button cmsg1"
                   >
-                    Install Update
+                    Upload Firmware
                   </button>
                 </div>
                 <p id="ota-status-text" style="text-align: center"></p>
@@ -3082,137 +3089,88 @@ const char index_html[] PROGMEM = R"rawliteral(
         scanBtn.innerText = "Scan";
       };
 
+      let pendingFirmwareFile = null;
+
       async function checkUpdate() {
         const checkBtn = document.getElementById("btn-check-ota");
         const updateDiv = document.getElementById("ota-update-found");
         const statusText = document.getElementById("ota-status-text");
 
         checkBtn.disabled = true;
-        updateDiv.style.display = "none";
         statusText.style.color = "";
         statusText.style.fontWeight = "normal";
-        statusText.innerText = "Checking for updates...";
+        statusText.innerText = "Reading current firmware...";
 
         try {
-          // STEP 1: Get current version and specific board type
           const localRes = await fetch("/get_version");
           const localData = await localRes.json();
           const currentVersion = localData.version;
-          const board = localData.board; // e.g., "esp32s3"
+          const board = localData.board || "esp32";
 
-          // STEP 2: Fetch latest info from GitHub
-          const githubRes = await fetch(
-            "https://esptimecast.github.io/ota.json?t=" + Date.now(),
-          );
-          if (!githubRes.ok)
-            throw new Error(`GitHub returned ${githubRes.status}`);
-
-          const githubData = await githubRes.json();
-          const latestVersion = githubData.version;
-
-          // STEP 3: Semantic Comparison
-          const parseV = (v) =>
-            v
-              .replace(/[^\d.]/g, "")
-              .split(".")
-              .map(Number);
-          const vRemote = parseV(latestVersion);
-          const vLocal = parseV(currentVersion);
-
-          let isNewer = false;
-          for (let i = 0; i < 3; i++) {
-            if ((vRemote[i] || 0) > (vLocal[i] || 0)) {
-              isNewer = true;
-              break;
-            }
-            if ((vRemote[i] || 0) < (vLocal[i] || 0)) {
-              isNewer = false;
-              break;
-            }
-          }
-
-          if (isNewer) {
-            // DYNAMIC LINK SELECTION:
-            // Matches "esp32s3" from device to "esp32s3" in ota.json
-            pendingBinUrl = githubData.bins[board];
-
-            if (!pendingBinUrl) {
-              throw new Error(`No binary found for board: ${board}`);
-            }
-
-            console.log(`Found Update for ${board}:`, pendingBinUrl);
-
-            statusText.style.fontWeight = "bold";
-            statusText.style.color = "#2ecc71";
-            statusText.innerText = `New v${latestVersion} found! (Current: v${currentVersion})`;
-
-            checkBtn.style.display = "none";
-            updateDiv.style.display = "block";
-          } else {
-            statusText.innerText = `Up to date (v${currentVersion})`;
-            setTimeout(() => {
-              checkBtn.disabled = false;
-              statusText.innerText = "";
-            }, 3000);
-          }
+          statusText.style.color = "#2ecc71";
+          statusText.innerText = `Current firmware: v${currentVersion} (${board}). Select your custom .bin file.`;
+          updateDiv.style.display = "block";
+          checkBtn.style.display = "none";
         } catch (e) {
-          console.error("OTA Check Error:", e);
+          console.error("OTA prep error:", e);
           statusText.style.color = "#ff4444";
-          statusText.innerText = "Check Failed: " + e.message;
-          setTimeout(() => {
-            checkBtn.disabled = false;
-          }, 5000);
+          statusText.innerText = "Unable to read device version: " + e.message;
+          checkBtn.disabled = false;
         }
       }
 
-      async function performUpdate() {
-        if (!pendingBinUrl) {
-          alert("No update URL found. Please check for updates again.");
+      function handleOtaFileSelected() {
+        const fileInput = document.getElementById("ota-file");
+        const statusText = document.getElementById("ota-status-text");
+        pendingFirmwareFile = fileInput && fileInput.files.length ? fileInput.files[0] : null;
+
+        if (!pendingFirmwareFile) {
+          statusText.innerText = "Select a firmware .bin file.";
           return;
         }
 
-        // 1. Initial UI feedback
+        statusText.style.color = "#2ecc71";
+        statusText.innerText = `Ready: ${pendingFirmwareFile.name} (${Math.round(pendingFirmwareFile.size / 1024)} KB)`;
+      }
+
+      async function performUpdate() {
+        const fileInput = document.getElementById("ota-file");
+        pendingFirmwareFile = fileInput && fileInput.files.length ? fileInput.files[0] : pendingFirmwareFile;
+
+        if (!pendingFirmwareFile) {
+          alert("Select a firmware .bin file first.");
+          return;
+        }
+
+        if (!pendingFirmwareFile.name.toLowerCase().endsWith(".bin")) {
+          alert("Please select a PlatformIO firmware .bin file.");
+          return;
+        }
+
         showSavingModal(
-          "<h3>🚀 Preparing Device...</h3><p>Entering update mode.</p>",
+          "<h3>Preparing Device...</h3><p>Entering update mode.</p>",
         );
 
         try {
-          // STEP 1: Signal the ESP to enter "Soft Maintenance" mode
-          // This clears the screen and stops background tasks on the ESP
           const prepRes = await fetch(`/perform_update`);
           if (!prepRes.ok)
             throw new Error("Device refused to enter update mode.");
 
-          // Brief pause to let the ESP UI update (show icon)
           await new Promise((r) => setTimeout(r, 800));
 
-          // STEP 2: Browser downloads the .bin from GitHub
           updateSavingModal(
-            "<h3>Step 1/2: Downloading...</h3><p>Fetching firmware from GitHub.</p>", true
-          );
-
-          const fileRes = await fetch(pendingBinUrl);
-          if (!fileRes.ok)
-            throw new Error("Could not download firmware from GitHub.");
-
-          const blob = await fileRes.blob();
-          console.log("Downloaded blob size:", blob.size);
-
-          // STEP 3: Browser uploads the blob to the ESP via POST
-          updateSavingModal(
-            "<h3>Step 2/2: Uploading...</h3>" +
+            "<h3>Uploading Firmware...</h3>" +
               "<p>Writing to flash memory.</p>" +
               "<span id='ota-progress-bar' style='font-size: 1.35em; font-weight: bold; color: #2ecc71;'>0%</span>",
             true,
           );
 
           const formData = new FormData();
-          formData.append("update", blob, "update.bin");
+          formData.append("update", pendingFirmwareFile, pendingFirmwareFile.name);
 
           const xhr = new XMLHttpRequest();
           xhr.open("POST", "/upload_ota");
 
-          // Track upload progress
           xhr.upload.onprogress = (e) => {
             if (e.lengthComputable) {
               const percent = Math.round((e.loaded / e.total) * 100);
@@ -3221,7 +3179,6 @@ const char index_html[] PROGMEM = R"rawliteral(
             }
           };
 
-          //Handle completion
           xhr.onload = function () {
             if (xhr.status === 200 && xhr.responseText.includes("OK")) {
               document.getElementById("configForm").style.display = "none";
@@ -3229,13 +3186,12 @@ const char index_html[] PROGMEM = R"rawliteral(
               document.querySelector("html").style.height = "100vh";
               document.body.style.height = "100vh";
               updateSavingModal(
-                "<h3>✅ Update Successful!</h3>" +
-                  "<p><b>ESPTimeCast</b> has been updated to the latest version.<br>Thank you for being part of the community.</p>" +
-                  "<p>❤️ <b>Built with love in Osaka!</b></p>" +
+                "<h3>Update Successful!</h3>" +
+                  "<p><b>ESPTimeCast</b> has been updated with your custom firmware.</p>" +
                   "<p><span id='modal-countdown'>Device is rebooting in 25</span></p>",
                 false,
               );
-              // Start countdown for page refresh
+
               let count = 25;
               const timer = setInterval(() => {
                 count--;
@@ -3249,7 +3205,7 @@ const char index_html[] PROGMEM = R"rawliteral(
               }, 1000);
             } else {
               updateSavingModal(
-                "<h3>❌ Upload Failed</h3><p>The device rejected the file.</p>",
+                "<h3>Upload Failed</h3><p>The device rejected the file.</p>",
                 false,
               );
             }
@@ -3257,7 +3213,7 @@ const char index_html[] PROGMEM = R"rawliteral(
 
           xhr.onerror = () => {
             updateSavingModal(
-              "<h3>❌Connection Lost</h3><p>Check your Wi-Fi and try again.</p>",
+              "<h3>Connection Lost</h3><p>Check your Wi-Fi and try again.</p>",
               false,
             );
           };
@@ -3266,7 +3222,7 @@ const char index_html[] PROGMEM = R"rawliteral(
         } catch (e) {
           console.error("OTA Error:", e);
           updateSavingModal(
-            "<h3>❌ Update Error</h3><p>" + e.message + "</p>",
+            "<h3>Update Error</h3><p>" + e.message + "</p>",
             false
           );
         }
