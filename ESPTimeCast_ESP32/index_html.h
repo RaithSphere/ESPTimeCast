@@ -806,6 +806,12 @@ const char index_html[] PROGMEM = R"rawliteral(
         margin-top: 0.75rem;
       }
 
+      .sensor-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.35rem 1rem;
+      }
+
       hr {
         margin: 1.5rem 0;
         border: 0;
@@ -1303,7 +1309,7 @@ const char index_html[] PROGMEM = R"rawliteral(
               </label>
 
               <label class="toggle-row-lg">
-                <span class="label-text">Indoor DHT11 Screen:</span>
+                <span class="label-text">Indoor AHT20 + BMP280 Screen:</span>
                 <span class="toggle-switch">
                   <input
                     type="checkbox"
@@ -1314,20 +1320,31 @@ const char index_html[] PROGMEM = R"rawliteral(
                 </span>
               </label>
 
-              <label for="dht11Pin">DHT11 GPIO Pin</label>
+              <label for="dht11Pin">I2C SDA GPIO Pin</label>
               <input
                 type="number"
                 id="dht11Pin"
                 name="dht11Pin"
                 min="0"
                 max="48"
-                value="19"
+                value="21"
               />
               <div class="small">
-                Use an unused GPIO with the DHT11 data pin pulled up to 3.3V.
+                Use I2C SDA for both indoor sensors.
               </div>
 
-              <label for="dht11TemperatureOffsetC">DHT11 Temperature Offset (°C)</label>
+              <label for="dht11SclPin">I2C SCL GPIO Pin</label>
+              <input
+                type="number"
+                id="dht11SclPin"
+                name="dht11SclPin"
+                min="0"
+                max="48"
+                value="22"
+              />
+              <div class="small">Use I2C SCL for both indoor sensors.</div>
+
+              <label for="dht11TemperatureOffsetC">AHT20 Temperature Offset (°C)</label>
               <input
                 type="number"
                 id="dht11TemperatureOffsetC"
@@ -1540,6 +1557,22 @@ const char index_html[] PROGMEM = R"rawliteral(
         <div class="sub-collapsible-content" aria-hidden="true">
           <div class="content-wrapper">
             <div class="toggle-padding device-info">
+              <span><strong>Indoor Sensor (AHT20 + BMP280):</strong></span>
+              <div class="sensor-grid">
+                <span>Enabled: <span id="indoorEnabled">No</span></span>
+                <span>Available: <span id="indoorAvailable">No</span></span>
+                <span>Temp: <span id="indoorTemp">-- °C</span></span>
+                <span>Raw Temp: <span id="indoorRawTemp">-- °C</span></span>
+                <span>Humidity: <span id="indoorHumidity">-- %</span></span>
+                <span>Pressure: <span id="indoorPressure">-- hPa</span></span>
+              </div>
+              <br /><br />
+              <span>Clock: <span id="panelClock">--:--:--</span></span
+              ><br /><br />
+              <span
+                >Outdoor Temperature:
+                <span id="panelOutdoorTemp">--</span></span
+              ><br /><br />
               <span>Firmware: <span id="fwVersion">...</span></span
               ><br /><br />
               <span>IP: <span id="ipDisplay">Fetching...</span></span
@@ -1562,7 +1595,7 @@ const char index_html[] PROGMEM = R"rawliteral(
               <span
                 >Total Lifetime: <span id="totalDisplay">Loading...</span></span
               >
-
+              <br /><br />
               <hr class="donation-divider" />
               <label class="toggle-row-lg" style="margin-top: 0.5rem;">
                 <span class="label-text">Already supporting ESPTimeCast ❤️:</span>
@@ -1732,13 +1765,48 @@ const char index_html[] PROGMEM = R"rawliteral(
               !!data.showHumidity;
             document.getElementById("dht11Enabled").checked =
               !!data.dht11Enabled;
-            document.getElementById("dht11Pin").value = data.dht11Pin || 19;
+            document.getElementById("dht11Pin").value = data.dht11Pin || 21;
+            document.getElementById("dht11SclPin").value =
+              data.dht11SclPin || 22;
             document.getElementById("dht11TemperatureOffsetC").value =
               data.dht11TemperatureOffsetC ?? 8;
             document.getElementById("colonBlinkEnabled").checked =
               !!data.colonBlinkEnabled;
             document.getElementById("showWeatherDescription").checked =
               !!data.showWeatherDescription;
+
+            const indoorData = data && data.indoor ? data.indoor : {};
+            const outdoorUnit = data.weatherUnits === "imperial" ? "°F" : "°C";
+            const tempValue =
+              indoorData.temperature !== undefined
+                ? `${Number(indoorData.temperature)}${outdoorUnit}`
+                : "--";
+            const rawTempValue =
+              indoorData.rawTemperatureC !== undefined
+                ? `${Number(indoorData.rawTemperatureC).toFixed(1)}°C`
+                : "--";
+            const humidityValue =
+              indoorData.humidity !== undefined
+                ? `${Number(indoorData.humidity)}%`
+                : "--";
+            const pressureValue =
+              indoorData.pressureHpa !== undefined
+                ? `${Number(indoorData.pressureHpa).toFixed(1)} hPa`
+                : "--";
+            const indoorEnabledEl = document.getElementById("indoorEnabled");
+            const indoorAvailableEl = document.getElementById("indoorAvailable");
+            const indoorTempEl = document.getElementById("indoorTemp");
+            const indoorRawTempEl = document.getElementById("indoorRawTemp");
+            const indoorHumidityEl = document.getElementById("indoorHumidity");
+            const indoorPressureEl = document.getElementById("indoorPressure");
+            if (indoorEnabledEl)
+              indoorEnabledEl.textContent = indoorData.enabled ? "Yes" : "No";
+            if (indoorAvailableEl)
+              indoorAvailableEl.textContent = indoorData.available ? "Yes" : "No";
+            if (indoorTempEl) indoorTempEl.textContent = tempValue;
+            if (indoorRawTempEl) indoorRawTempEl.textContent = rawTempValue;
+            if (indoorHumidityEl) indoorHumidityEl.textContent = humidityValue;
+            if (indoorPressureEl) indoorPressureEl.textContent = pressureValue;
 
             // --- Dimming Controls ---
             const autoDimmingEl = document.getElementById("autoDimmingEnabled");
@@ -1989,6 +2057,7 @@ const char index_html[] PROGMEM = R"rawliteral(
           document.getElementById("dht11Enabled").checked ? "on" : "",
         );
         formData.set("dht11Pin", document.getElementById("dht11Pin").value);
+        formData.set("dht11SclPin", document.getElementById("dht11SclPin").value);
         formData.set(
           "dht11TemperatureOffsetC",
           document.getElementById("dht11TemperatureOffsetC").value,
@@ -2792,6 +2861,151 @@ const char index_html[] PROGMEM = R"rawliteral(
         if (totalEl) totalEl.textContent = formatUptime(totalSeconds);
       }
 
+      const screenStateHistory = [];
+      let screenPollTimer = null;
+
+      function escapeHtml(value) {
+        return String(value)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;");
+      }
+
+      function renderScreenHistory() {
+        const historyEl = document.getElementById("screenHistory");
+        if (!historyEl) return;
+
+        if (screenStateHistory.length === 0) {
+          historyEl.innerHTML = "<li>--</li>";
+          return;
+        }
+
+        historyEl.innerHTML = screenStateHistory
+          .map(
+            (entry) =>
+              `<li>${escapeHtml(entry.mode)}: ${escapeHtml(entry.text)} <small>${entry.at}</small></li>`,
+          )
+          .join("");
+      }
+
+      function pushScreenHistory(mode, text) {
+        const cleanMode = (mode || "UNKNOWN").toString().toUpperCase();
+        const cleanText = (text || "--").toString().trim();
+        const compact = `${cleanMode}: ${cleanText || "--"}`;
+
+        if (screenStateHistory.length > 0 && screenStateHistory[0].raw === compact) {
+          return;
+        }
+
+        screenStateHistory.unshift({
+          raw: compact,
+          mode: cleanMode,
+          text: cleanText || "--",
+          at: new Date().toLocaleTimeString(),
+        });
+
+        if (screenStateHistory.length > 5) {
+          screenStateHistory.length = 5;
+        }
+        renderScreenHistory();
+      }
+
+      function fetchScreenMirror() {
+        return fetch("/status")
+          .then((res) => res.json())
+          .then((data) => {
+            const screenModeEl = document.getElementById("screenMode");
+            const screenTextEl = document.getElementById("screenMirror");
+            const panelClockEl = document.getElementById("panelClock");
+            const panelOutdoorTempEl = document.getElementById("panelOutdoorTemp");
+            const mode = (data.screenMode || data.mode || "--")
+              .toString()
+              .toUpperCase();
+            const text = (data.screenText || "--").toString();
+            const indoorData = data.indoor || {};
+            const weatherData = data.weather || {};
+            const weatherUnit = data.weatherUnits === "imperial" ? "Â°F" : "Â°C";
+
+            if (screenModeEl) screenModeEl.textContent = mode;
+            if (screenTextEl) screenTextEl.textContent = text.toUpperCase();
+            if (panelClockEl) panelClockEl.textContent = data.localTime || "--:--:--";
+            if (panelOutdoorTempEl) {
+              panelOutdoorTempEl.textContent =
+                weatherData.currentTemperature !== undefined &&
+                weatherData.currentTemperature !== null
+                  ? `${weatherData.currentTemperature}${weatherUnit}`
+                  : "--";
+            }
+
+            pushScreenHistory(mode, text);
+
+            const indoorEnabledEl = document.getElementById("indoorEnabled");
+            const indoorAvailableEl = document.getElementById("indoorAvailable");
+            const indoorTempEl = document.getElementById("indoorTemp");
+            const indoorRawTempEl = document.getElementById("indoorRawTemp");
+            const indoorHumidityEl = document.getElementById("indoorHumidity");
+            const indoorPressureEl = document.getElementById("indoorPressure");
+            const unit = indoorData.units || "°C";
+
+            if (indoorEnabledEl)
+              indoorEnabledEl.textContent = indoorData.enabled ? "Yes" : "No";
+            if (indoorAvailableEl)
+              indoorAvailableEl.textContent = indoorData.available ? "Yes" : "No";
+            if (indoorTempEl) {
+              indoorTempEl.textContent = indoorData.temperature !== undefined
+                ? `${Number(indoorData.temperature)}${unit}`
+                : "--";
+            }
+            if (indoorRawTempEl) {
+              indoorRawTempEl.textContent =
+                indoorData.rawTemperatureC !== undefined
+                  ? `${Number(indoorData.rawTemperatureC).toFixed(1)}°C`
+                  : "--";
+            }
+            if (indoorHumidityEl) {
+              indoorHumidityEl.textContent =
+                indoorData.humidity !== undefined
+                  ? `${Number(indoorData.humidity)}%`
+                  : "--";
+            }
+            if (indoorPressureEl) {
+              indoorPressureEl.textContent =
+                indoorData.pressureHpa !== undefined
+                  ? `${Number(indoorData.pressureHpa).toFixed(1)} hPa`
+                  : "--";
+            }
+          })
+          .catch((err) =>
+            console.error("Error fetching /status for screen mirror:", err),
+          );
+      }
+
+      function setScreenPollInterval(ms) {
+        const interval = parseInt(ms, 10);
+        if (![1000, 5000, 10000].includes(interval)) return;
+        if (screenPollTimer) {
+          clearInterval(screenPollTimer);
+          screenPollTimer = null;
+        }
+        fetchScreenMirror();
+        screenPollTimer = setInterval(fetchScreenMirror, interval);
+        localStorage.setItem("screenPollMs", String(interval));
+      }
+
+      function restoreScreenPollInterval() {
+        const selector = document.getElementById("screenPollRate");
+        if (!selector) {
+          setScreenPollInterval("5000");
+          return;
+        }
+
+        const saved = parseInt(localStorage.getItem("screenPollMs"), 10);
+        const values = ["1000", "5000", "10000"];
+        const selected = values.includes(String(saved)) ? String(saved) : "1000";
+        selector.value = selected;
+        setScreenPollInterval(selected);
+      }
+
       // Keep your existing formatUptime function as is
       function formatUptime(seconds) {
         const days = Math.floor(seconds / 86400);
@@ -2806,6 +3020,7 @@ const char index_html[] PROGMEM = R"rawliteral(
       }
 
       fetchUptime();
+      restoreScreenPollInterval();
 
       function sendCustomMessage() {
         const input = document.getElementById("customMessage");
@@ -3276,3 +3491,9 @@ const char index_html[] PROGMEM = R"rawliteral(
   </body>
 </html>
 )rawliteral";
+
+
+
+
+
+

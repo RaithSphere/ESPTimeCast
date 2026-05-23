@@ -25,6 +25,9 @@ See LICENSE.txt for full terms.
 #include <WiFiClientSecure.h>
 #include <ESPmDNS.h>
 #include <Update.h>
+#include <Wire.h>
+#include <Adafruit_AHTX0.h>
+#include <Adafruit_BMP280.h>
 #include "version.h"
 #include "mfactoryfont.h"
 #include <Preferences.h>
@@ -152,9 +155,10 @@ bool twelveHourToggle = false;
 bool showDayOfWeek = true;
 bool showDate = false;
 bool showHumidity = false;
-bool dht11Enabled = false;
-int dht11Pin = 19;
-float dht11TemperatureOffsetC = 8.0;
+bool indoorEnabled = false;
+int indoorSdaPin = 21;
+int indoorSclPin = 22;
+float indoorTemperatureOffsetC = 8.0;
 bool colonBlinkEnabled = true;
 char ntpServer1[64] = "pool.ntp.org";
 char ntpServer2[256] = "time.nist.gov";
@@ -232,12 +236,16 @@ bool clockScrollDone = false;
 int currentHumidity = -1;
 bool ntpSyncSuccessful = false;
 
-bool dht11Available = false;
-float dht11RawTemperatureC = NAN;
-float dht11TemperatureC = NAN;
-int dht11Humidity = -1;
-unsigned long lastDht11Read = 0;
-const unsigned long DHT11_READ_INTERVAL = 2500;
+bool indoorAvailable = false;
+bool indoorSensorsInitialized = false;
+float indoorRawTemperatureC = NAN;
+float indoorTemperatureC = NAN;
+int indoorHumidity = -1;
+float indoorPressureHpa = NAN;
+unsigned long lastIndoorSensorRead = 0;
+const unsigned long INDOOR_READ_INTERVAL = 2500;
+Adafruit_AHTX0 aht20;
+Adafruit_BMP280 bmp280;
 
 // NTP Synchronization State Machine
 enum NtpState {
@@ -298,6 +306,7 @@ unsigned long timerOriginalDuration = 0;  // For RESTART command
 unsigned long timerFinishStartTime = 0;
 unsigned long timerEndTime = 0;
 bool isStopwatch = false;
+String lastDisplayText = "--";
 
 // Pomodoro
 bool isPomodoroActive = false;
@@ -315,12 +324,15 @@ bool hideDonationMsg = false;    // true = user opted out (or is an existing cus
 bool donationFirstBoot = false;  // true only on a fresh install (no prior config.json)
 time_t nextDonationTime = 0;     // Unix timestamp for next scheduled message
 
+const bool kRetryDefaultI2CPins = true; // fallback to default SDA=21, SCL=22 if configured pins fail
+
 // Forward declarations
 void advanceDisplayMode(bool forced = false);
 void previousDisplayMode(bool forced = false);
 void goToMode(const String &target);
 bool handlePomodoroCommand(String cmd);
-void updateDht11Reading(bool force = false);
+void updateIndoorReading(bool force = false);
+bool initIndoorSensorsOnPins(int sdaPin, int sclPin, bool logPins = true);
 
 const char *getModeName(int mode) {
   switch (mode) {
@@ -403,8 +415,9 @@ void loadConfig() {
     doc[F("showDate")] = false;
     doc[F("showHumidity")] = showHumidity;
     doc[F("dht11Enabled")] = false;
-    doc[F("dht11Pin")] = dht11Pin;
-    doc[F("dht11TemperatureOffsetC")] = dht11TemperatureOffsetC;
+    doc[F("dht11Pin")] = indoorSdaPin;
+    doc[F("dht11SclPin")] = indoorSclPin;
+    doc[F("dht11TemperatureOffsetC")] = indoorTemperatureOffsetC;
     doc[F("colonBlinkEnabled")] = colonBlinkEnabled;
     doc[F("ntpServer1")] = ntpServer1;
     doc[F("ntpServer2")] = ntpServer2;
@@ -497,16 +510,21 @@ void loadConfig() {
   showDayOfWeek = doc["showDayOfWeek"] | true;
   showDate = doc["showDate"] | false;
   showHumidity = doc["showHumidity"] | false;
-  dht11Enabled = doc["dht11Enabled"] | false;
-  dht11Pin = doc["dht11Pin"] | 19;
-  dht11TemperatureOffsetC = doc["dht11TemperatureOffsetC"] | 8.0;
-  if (dht11Pin < 0 || dht11Pin > 48) {
-    Serial.println(F("[CONFIG] Invalid DHT11 pin in config, falling back to GPIO 19."));
-    dht11Pin = 19;
+  indoorEnabled = doc["dht11Enabled"] | false;
+  indoorSdaPin = doc["dht11Pin"] | 21;
+  indoorSclPin = doc.containsKey("dht11SclPin") ? doc["dht11SclPin"].as<int>() : 22;
+  indoorTemperatureOffsetC = doc["dht11TemperatureOffsetC"] | 8.0;
+  if (indoorSdaPin < 0 || indoorSdaPin > 48) {
+    Serial.println(F("[CONFIG] Invalid AHT20/BMP280 SDA pin in config, falling back to GPIO 21."));
+    indoorSdaPin = 21;
   }
-  if (dht11TemperatureOffsetC < -20.0 || dht11TemperatureOffsetC > 20.0) {
-    Serial.println(F("[CONFIG] Invalid DHT11 temperature offset, falling back to +8.0C."));
-    dht11TemperatureOffsetC = 8.0;
+  if (indoorSclPin < 0 || indoorSclPin > 48) {
+    Serial.println(F("[CONFIG] Invalid AHT20/BMP280 SCL pin in config, falling back to GPIO 22."));
+    indoorSclPin = 22;
+  }
+  if (indoorTemperatureOffsetC < -20.0 || indoorTemperatureOffsetC > 20.0) {
+    Serial.println(F("[CONFIG] Invalid AHT20/BMP280 temperature offset, falling back to +8.0C."));
+    indoorTemperatureOffsetC = 8.0;
   }
   colonBlinkEnabled = doc.containsKey("colonBlinkEnabled") ? doc["colonBlinkEnabled"].as<bool>() : true;
   showWeatherDescription = doc["showWeatherDescription"] | false;
@@ -617,16 +635,22 @@ void loadConfig() {
   }
 
   if (!doc.containsKey("dht11Enabled")) {
-    doc["dht11Enabled"] = dht11Enabled;
-    doc["dht11Pin"] = dht11Pin;
-    doc["dht11TemperatureOffsetC"] = dht11TemperatureOffsetC;
+    doc["dht11Enabled"] = indoorEnabled;
+    doc["dht11Pin"] = indoorSdaPin;
+    doc["dht11SclPin"] = indoorSclPin;
+    doc["dht11TemperatureOffsetC"] = indoorTemperatureOffsetC;
     configChanged = true;
-    Serial.println(F("[CONFIG] Migrated: added DHT11 indoor sensor defaults."));
+    Serial.println(F("[CONFIG] Migrated: added AHT20+BMP280 indoor sensor defaults."));
+  }
+  if (!doc.containsKey("dht11SclPin")) {
+    doc["dht11SclPin"] = indoorSclPin;
+    configChanged = true;
+    Serial.println(F("[CONFIG] Migrated: added AHT20+BMP280 SCL pin default."));
   }
   if (!doc.containsKey("dht11TemperatureOffsetC")) {
-    doc["dht11TemperatureOffsetC"] = dht11TemperatureOffsetC;
+    doc["dht11TemperatureOffsetC"] = indoorTemperatureOffsetC;
     configChanged = true;
-    Serial.println(F("[CONFIG] Migrated: added DHT11 temperature calibration offset."));
+    Serial.println(F("[CONFIG] Migrated: added AHT20+BMP280 temperature calibration offset."));
   }
 
   // --- Save migrated config if needed ---
@@ -1398,6 +1422,7 @@ void setupWebServer() {
       else if (n == "showHumidity") doc[n] = (v == "true" || v == "on" || v == "1");
       else if (n == "dht11Enabled") doc[n] = (v == "true" || v == "on" || v == "1");
       else if (n == "dht11Pin") doc[n] = v.toInt();
+      else if (n == "dht11SclPin") doc[n] = v.toInt();
       else if (n == "dht11TemperatureOffsetC") doc[n] = constrain(v.toFloat(), -20.0f, 20.0f);
       else if (n == "colonBlinkEnabled") doc[n] = (v == "true" || v == "on" || v == "1");
       else if (n == "dimStartHour") doc[n] = v.toInt();
@@ -1825,6 +1850,8 @@ void setupWebServer() {
     doc["displayMode"] = displayMode;
     doc["displayBusy"] = (displayMode == 6 || displayMode == 7);
     doc["allowInterrupt"] = allowInterrupt;
+    doc["screenText"] = lastDisplayText;
+    doc["screenMode"] = getModeName(displayMode);
 
     switch (displayMode) {
       case 0: doc["mode"] = "clock"; break;
@@ -1892,23 +1919,26 @@ void setupWebServer() {
     weather["sunsetMinute"] = weatherAvailable ? sunsetMinute : JsonVariant();
 
     JsonObject indoor = doc.createNestedObject("indoor");
-    indoor["enabled"] = dht11Enabled;
-    indoor["pin"] = dht11Pin;
-    indoor["temperatureOffsetC"] = dht11TemperatureOffsetC;
-    indoor["available"] = dht11Available;
-    if (dht11Available) {
-      indoor["rawTemperatureC"] = dht11RawTemperatureC;
-      indoor["temperatureC"] = dht11TemperatureC;
+    indoor["enabled"] = indoorEnabled;
+    indoor["pin"] = indoorSdaPin;
+    indoor["sclPin"] = indoorSclPin;
+    indoor["temperatureOffsetC"] = indoorTemperatureOffsetC;
+    indoor["available"] = indoorAvailable;
+    if (indoorAvailable) {
+      indoor["rawTemperatureC"] = indoorRawTemperatureC;
+      indoor["temperatureC"] = indoorTemperatureC;
       indoor["temperature"] = (strcmp(weatherUnits, "imperial") == 0)
-                                  ? (int)round((dht11TemperatureC * 9.0 / 5.0) + 32.0)
-                                  : (int)round(dht11TemperatureC);
-      indoor["humidity"] = dht11Humidity;
+                                  ? (int)round((indoorTemperatureC * 9.0 / 5.0) + 32.0)
+                                  : (int)round(indoorTemperatureC);
+      indoor["humidity"] = indoorHumidity;
+      indoor["pressureHpa"] = indoorPressureHpa;
       indoor["units"] = String(weatherUnits);
     } else {
       indoor["rawTemperatureC"] = JsonVariant();
       indoor["temperatureC"] = JsonVariant();
       indoor["temperature"] = JsonVariant();
       indoor["humidity"] = JsonVariant();
+      indoor["pressureHpa"] = JsonVariant();
       indoor["units"] = String(weatherUnits);
     }
 
@@ -1948,9 +1978,10 @@ void setupWebServer() {
     config["twelveHourToggle"] = twelveHourToggle;
     config["showDate"] = showDate;
     config["showHumidity"] = showHumidity;
-    config["dht11Enabled"] = dht11Enabled;
-    config["dht11Pin"] = dht11Pin;
-    config["dht11TemperatureOffsetC"] = dht11TemperatureOffsetC;
+    config["dht11Enabled"] = indoorEnabled;
+    config["dht11Pin"] = indoorSdaPin;
+    config["dht11SclPin"] = indoorSclPin;
+    config["dht11TemperatureOffsetC"] = indoorTemperatureOffsetC;
     config["ntpServer1"] = String(ntpServer1);
 
     String nsUrl = String(ntpServer2);
@@ -2578,86 +2609,115 @@ String buildWeatherURL() {
   return base;
 }
 
-bool waitForDhtLevel(int pin, int level, uint32_t timeoutMicros) {
-  uint32_t started = micros();
-  while (digitalRead(pin) != level) {
-    if (micros() - started > timeoutMicros) return false;
-    yield();
+bool initIndoorSensors() {
+  if (indoorSensorsInitialized) return true;
+
+  bool okSensors = initIndoorSensorsOnPins(indoorSdaPin, indoorSclPin, true);
+
+  if (!okSensors && kRetryDefaultI2CPins && !(indoorSdaPin == 21 && indoorSclPin == 22)) {
+    Serial.println(F("[INDOOR] Configured pins failed; retrying default SDA=21, SCL=22."));
+    okSensors = initIndoorSensorsOnPins(21, 22, true);
+    if (okSensors) {
+      indoorSdaPin = 21;
+      indoorSclPin = 22;
+    }
   }
-  return true;
+
+  indoorSensorsInitialized = okSensors;
+  return indoorSensorsInitialized;
 }
 
-bool readDht11Raw(int pin, float &temperatureC, int &humidity) {
-  uint8_t data[5] = { 0, 0, 0, 0, 0 };
+bool initIndoorSensorsOnPins(int sdaPin, int sclPin, bool logPins) {
+  if (sdaPin < 0 || sdaPin > 48 || sclPin < 0 || sclPin > 48 || sdaPin == sclPin) {
+    return false;
+  }
 
-  pinMode(pin, OUTPUT);
-  digitalWrite(pin, HIGH);
-  delay(250);
-  digitalWrite(pin, LOW);
+  Wire.end();
+  Wire.begin(sdaPin, sclPin);
   delay(20);
-  digitalWrite(pin, HIGH);
-  delayMicroseconds(40);
-  pinMode(pin, INPUT_PULLUP);
 
-  if (!waitForDhtLevel(pin, LOW, 1000)) return false;
-  if (!waitForDhtLevel(pin, HIGH, 1000)) return false;
-  if (!waitForDhtLevel(pin, LOW, 1000)) return false;
-
-  for (int i = 0; i < 40; i++) {
-    if (!waitForDhtLevel(pin, HIGH, 1000)) return false;
-    uint32_t highStart = micros();
-    if (!waitForDhtLevel(pin, LOW, 1000)) return false;
-    uint32_t highPulse = micros() - highStart;
-
-    data[i / 8] <<= 1;
-    if (highPulse > 45) data[i / 8] |= 1;
+  if (logPins) {
+    Serial.printf("[I2C] Retrying init on SDA=%d SCL=%d\n", sdaPin, sclPin);
   }
 
-  uint8_t checksum = data[0] + data[1] + data[2] + data[3];
-  if (checksum != data[4]) return false;
-
-  humidity = data[0];
-  temperatureC = data[2];
-  if (data[3] != 0) {
-    temperatureC += data[3] / 10.0;
+  bool okAht20 = aht20.begin();
+  bool okBmp = false;
+  if (okAht20) {
+    okBmp = bmp280.begin(0x76);
+    if (!okBmp) {
+      okBmp = bmp280.begin(0x77);
+    }
   }
-  return humidity >= 0 && humidity <= 100 && temperatureC > -20 && temperatureC < 80;
+
+  if (logPins) {
+    if (okAht20) {
+      Serial.println(F("[I2C] AHT20 detected."));
+    } else {
+      Serial.println(F("[I2C] AHT20 not detected."));
+    }
+    if (okBmp) {
+      bmp280.setSampling(Adafruit_BMP280::MODE_NORMAL, Adafruit_BMP280::SAMPLING_X2, Adafruit_BMP280::SAMPLING_X16, Adafruit_BMP280::FILTER_X16, Adafruit_BMP280::STANDBY_MS_500);
+      Serial.println(F("[I2C] BMP280 detected."));
+    } else {
+      Serial.println(F("[I2C] BMP280 not detected on 0x76/0x77."));
+    }
+  }
+
+  return okAht20 && okBmp;
 }
 
 String formatIndoorTemperature() {
-  float displayTemp = dht11TemperatureC;
+  if (isnan(indoorTemperatureC)) return "--";
+
+  float displayTemp = indoorTemperatureC;
   if (strcmp(weatherUnits, "imperial") == 0) {
     displayTemp = (displayTemp * 9.0 / 5.0) + 32.0;
   }
   return String((int)round(displayTemp)) + String((char)176);
 }
 
-void updateDht11Reading(bool force) {
-  if (!dht11Enabled) {
-    dht11Available = false;
-    dht11RawTemperatureC = NAN;
-    dht11Humidity = -1;
+void updateIndoorReading(bool force) {
+  if (!indoorEnabled) {
+    indoorAvailable = false;
+    indoorRawTemperatureC = NAN;
+    indoorHumidity = -1;
+    indoorPressureHpa = NAN;
     return;
   }
 
   unsigned long now = millis();
-  if (!force && now - lastDht11Read < DHT11_READ_INTERVAL) return;
-  lastDht11Read = now;
+  if (!force && now - lastIndoorSensorRead < INDOOR_READ_INTERVAL) return;
+  lastIndoorSensorRead = now;
 
-  float temperatureC;
-  int humidity;
-  if (readDht11Raw(dht11Pin, temperatureC, humidity)) {
-    dht11RawTemperatureC = temperatureC;
-    dht11TemperatureC = temperatureC + dht11TemperatureOffsetC;
-    dht11Humidity = humidity;
-    dht11Available = true;
-    Serial.printf("[DHT11] Indoor: %.1fC raw, %.1fC calibrated (%+.1fC), %d%% on GPIO %d\n",
-                  dht11RawTemperatureC, dht11TemperatureC, dht11TemperatureOffsetC, dht11Humidity, dht11Pin);
+  if (!initIndoorSensors()) {
+    indoorAvailable = false;
+    indoorRawTemperatureC = NAN;
+    indoorHumidity = -1;
+    indoorPressureHpa = NAN;
+    return;
+  }
+
+  sensors_event_t humidityEvent;
+  sensors_event_t tempEvent;
+  aht20.getEvent(&humidityEvent, &tempEvent);
+  float temperatureC = tempEvent.temperature;
+  float pressureHpa = bmp280.readPressure() / 100.0F;
+  int humidity = (int)round(humidityEvent.relative_humidity);
+
+  if (!isnan(temperatureC) && humidity >= 0 && humidity <= 100 && pressureHpa > 300 && pressureHpa < 1200) {
+    indoorRawTemperatureC = temperatureC;
+    indoorTemperatureC = temperatureC + indoorTemperatureOffsetC;
+    indoorHumidity = humidity;
+    indoorPressureHpa = pressureHpa;
+    indoorAvailable = true;
+    Serial.printf("[INDOOR] AHT20: %.1fC raw, %.1fC calibrated (%+.1fC), %d%%. BMP280: %.1fhPa on SDA %d SCL %d\n",
+                  indoorRawTemperatureC, indoorTemperatureC, indoorTemperatureOffsetC, indoorHumidity, indoorPressureHpa, indoorSdaPin, indoorSclPin);
   } else {
-    dht11Available = false;
-    dht11RawTemperatureC = NAN;
-    dht11Humidity = -1;
-    Serial.printf("[DHT11] Read failed on GPIO %d\n", dht11Pin);
+    indoorAvailable = false;
+    indoorRawTemperatureC = NAN;
+    indoorHumidity = -1;
+    indoorPressureHpa = NAN;
+    Serial.printf("[INDOOR] Read failed on SDA %d SCL %d\n", indoorSdaPin, indoorSclPin);
   }
 }
 
@@ -3739,7 +3799,7 @@ DisplayMode key:
   4: Nightscout
   5: Date
   6: Custom Message
-  8: Indoor (DHT11)
+  8: Indoor (AHT20 + BMP280)
 */
 void setup() {
   // pinMode(BUTTON_PIN, INPUT_PULLUP);  // ← Uncomment if using button
@@ -3770,7 +3830,7 @@ void setup() {
   P.setCharSpacing(0);
   P.setFont(mFactory);
   loadConfig();
-  updateDht11Reading(true);
+  updateIndoorReading(true);
   P.setIntensity(brightness);
   if (displayOff) {
     P.displayShutdown(true);
@@ -4003,7 +4063,7 @@ bool isModeAvailable(int mode) {
     case 4: return nightscoutConfigured;
     case 5: return showDate;
     case 6: return strlen(customMessage) > 0;
-    case 8: return dht11Enabled && dht11Available;
+    case 8: return indoorEnabled && indoorAvailable;
   }
   return false;
 }
@@ -4077,9 +4137,10 @@ bool saveConfigRuntime() {
   doc["showDayOfWeek"] = showDayOfWeek;
   doc["showDate"] = showDate;
   doc["showHumidity"] = showHumidity;
-  doc["dht11Enabled"] = dht11Enabled;
-  doc["dht11Pin"] = dht11Pin;
-  doc["dht11TemperatureOffsetC"] = dht11TemperatureOffsetC;
+  doc["dht11Enabled"] = indoorEnabled;
+  doc["dht11Pin"] = indoorSdaPin;
+  doc["dht11SclPin"] = indoorSclPin;
+  doc["dht11TemperatureOffsetC"] = indoorTemperatureOffsetC;
   doc["colonBlinkEnabled"] = colonBlinkEnabled;
   doc["clockOnlyDuringDimming"] = clockOnlyDuringDimming;
   doc["hideDonationMsg"] = hideDonationMsg;
@@ -4540,7 +4601,7 @@ void loop() {
     }
   }
 
-  updateDht11Reading();
+  updateIndoorReading();
 
   // --- MODIFIED WEATHER FETCHING LOGIC ---
   if (WiFi.status() == WL_CONNECTED) {
@@ -4637,6 +4698,7 @@ void loop() {
 
   // --- CLOCK Display Mode ---
   if (displayMode == 0) {
+    lastDisplayText = getModeName(displayMode);
     if (forceMessageRestart) {
       P.displayReset();
       P.displayClear();
@@ -4648,6 +4710,7 @@ void loop() {
 
     // --- NTP SYNC ---
     if (ntpState == NTP_SYNCING) {
+      lastDisplayText = "SYNCING";
       P.setTextAlignment(PA_CENTER);
       if (ntpSyncSuccessful || ntpRetryCount >= maxNtpRetries || millis() - ntpStartTime > ntpTimeout) {
         ntpState = NTP_FAILED;
@@ -4664,6 +4727,7 @@ void loop() {
     }
     // --- NTP / WEATHER ERROR ---
     else if (!ntpSyncSuccessful) {
+      lastDisplayText = "TIME ERROR";
       if (forceMessageRestart) return;
       P.setTextAlignment(PA_CENTER);
       static unsigned long errorAltTimer = 0;
@@ -4692,6 +4756,7 @@ void loop() {
       if (showDayOfWeek && colonBlinkEnabled && !colonVisible) {
         timeString.replace(":", " ");
       }
+      lastDisplayText = timeString;
 
       // --- SCROLL IN ONLY WHEN COMING FROM SPECIFIC MODES OR FIRST BOOT ---
       bool shouldScrollIn = false;
@@ -4744,6 +4809,7 @@ void loop() {
   // --- WEATHER Display Mode ---
   static bool weatherWasAvailable = false;
   if (displayMode == 1) {
+    lastDisplayText = "WEATHER";
     if (forceMessageRestart) return;
     P.setCharSpacing(1);
     P.setTextAlignment(PA_CENTER);
@@ -4755,6 +4821,7 @@ void loop() {
       } else {
         weatherDisplay = currentTemp + tempSymbol;
       }
+      lastDisplayText = weatherDisplay;
       P.print(weatherDisplay.c_str());
       weatherWasAvailable = true;
     } else {
@@ -4765,9 +4832,11 @@ void loop() {
       if (ntpSyncSuccessful) {
         String timeString = formattedTime;
         if (!colonVisible) timeString.replace(":", " ");
+        lastDisplayText = timeString;
         P.setCharSpacing(0);
         P.print(timeString);
       } else {
+        lastDisplayText = "N/A";
         P.setCharSpacing(0);
         P.setTextAlignment(PA_CENTER);
         P.write(1);
@@ -4777,22 +4846,27 @@ void loop() {
     return;
   }
 
-  // --- INDOOR Display Mode (DHT11) ---
+  // --- INDOOR Display Mode (AHT20 + BMP280) ---
   static bool indoorWasAvailable = false;
   if (displayMode == 8) {
     if (forceMessageRestart) return;
-    updateDht11Reading();
-    P.setCharSpacing(1);
+    updateIndoorReading();
+    P.setCharSpacing(0);
     P.setTextAlignment(PA_CENTER);
 
-    if (dht11Available) {
+    if (indoorAvailable) {
       String indoorDisplay = "I" + formatIndoorTemperature();
-      if (dht11Humidity != -1) {
-        int cappedHumidity = (dht11Humidity > 99) ? 99 : dht11Humidity;
+      if (indoorHumidity != -1) {
+        int cappedHumidity = (indoorHumidity > 99) ? 99 : indoorHumidity;
         indoorDisplay += " " + String(cappedHumidity) + "%";
       } else {
-        indoorDisplay += tempSymbol;
+        indoorDisplay += " " + String(tempSymbol);
       }
+      if (!isnan(indoorPressureHpa)) {
+        indoorDisplay += " " + String((int)round(indoorPressureHpa)) + "hPa";
+      }
+
+      lastDisplayText = indoorDisplay;
       P.print(indoorDisplay.c_str());
       indoorWasAvailable = true;
     } else {
@@ -4803,9 +4877,11 @@ void loop() {
       if (ntpSyncSuccessful) {
         String timeString = formattedTime;
         if (!colonVisible) timeString.replace(":", " ");
+        lastDisplayText = timeString;
         P.setCharSpacing(0);
         P.print(timeString);
       } else {
+        lastDisplayText = "N/A";
         P.setCharSpacing(0);
         P.setTextAlignment(PA_CENTER);
         P.write(1);
@@ -4818,6 +4894,7 @@ void loop() {
 
   // --- WEATHER DESCRIPTION Display Mode ---
   if (displayMode == 2 && showWeatherDescription && weatherAvailable && weatherDescription.length() > 0) {
+    lastDisplayText = weatherDescription;
     P.setCharSpacing(1);
     P.setTextAlignment(PA_CENTER);
     if (forceMessageRestart) return;
@@ -4883,6 +4960,7 @@ void loop() {
 
   // --- Countdown Display Mode ---
   if (displayMode == 3 && countdownEnabled && ntpSyncSuccessful) {
+    lastDisplayText = "COUNTDOWN";
     if (forceMessageRestart) return;
     const unsigned long SEGMENT_DISPLAY_DURATION = 1500;  // 1.5 seconds for each static segment
 
@@ -4921,15 +4999,16 @@ void loop() {
         const char *hourglassFrames[] = { "¡", "¢", "£", "¤" };
         for (int repeat = 0; repeat < 3; repeat++) {
           for (int i = 0; i < 4; i++) {
-            if (displayMode != 3) return;
-            if (forceMessageRestart) return;
-            P.setTextAlignment(PA_CENTER);
-            P.setCharSpacing(0);
-            P.print(hourglassFrames[i]);
+        if (displayMode != 3) return;
+        if (forceMessageRestart) return;
+        P.setTextAlignment(PA_CENTER);
+        P.setCharSpacing(0);
+        P.print(hourglassFrames[i]);
             delay(350);  // This is blocking! (Total ~4.2 seconds for hourglass)
           }
         }
         Serial.println("[COUNTDOWN-FINISH] Played hourglass animation.");
+        lastDisplayText = "TIMES UP";
         P.displayClear();  // Clear display after hourglass animation
 
         // 2. Initialize Flashing "TIMES UP" for its very first frame
@@ -5004,6 +5083,7 @@ void loop() {
               if (days > 0) {
                 currentSegmentText = String(days) + " " + (days == 1 ? "DAY" : "DAYS");
                 Serial.printf("[COUNTDOWN-STATIC] Displaying segment %d: %s\n", countdownSegment, currentSegmentText.c_str());
+                lastDisplayText = currentSegmentText;
                 countdownSegment++;
               } else {
                 // Skip days if zero
@@ -5017,6 +5097,7 @@ void loop() {
                 sprintf(buf, "%02ld HRS", hours);  // pad hours with 0
                 currentSegmentText = String(buf);
                 Serial.printf("[COUNTDOWN-STATIC] Displaying segment %d: %s\n", countdownSegment, currentSegmentText.c_str());
+                lastDisplayText = currentSegmentText;
                 countdownSegment++;
                 break;
               }
@@ -5026,6 +5107,7 @@ void loop() {
                 sprintf(buf, "%02ld MINS", minutes);  // pad minutes with 0
                 currentSegmentText = String(buf);
                 Serial.printf("[COUNTDOWN-STATIC] Displaying segment %d: %s\n", countdownSegment, currentSegmentText.c_str());
+                lastDisplayText = currentSegmentText;
                 countdownSegment++;
                 break;
               }
@@ -5040,6 +5122,7 @@ void loop() {
                 sprintf(secondsBuf, "%02ld %s", currentSecond, currentSecond == 1 ? "SEC" : "SECS");
                 String secondsText = String(secondsBuf);
                 Serial.printf("[COUNTDOWN-STATIC] Displaying segment 3: %s\n", secondsText.c_str());
+                lastDisplayText = secondsText;
                 P.displayClear();
                 P.setTextAlignment(PA_CENTER);
                 P.setCharSpacing(1);
@@ -5054,6 +5137,7 @@ void loop() {
                 P.setTextAlignment(PA_CENTER);
                 P.setCharSpacing(1);
                 P.print(secondsText.c_str());
+                lastDisplayText = secondsText;
                 delay(400);
 
                 String label;
@@ -5200,6 +5284,7 @@ void loop() {
 
   // --- NIGHTSCOUT Display Mode ---
   if (displayMode == 4) {
+    lastDisplayText = "NIGHTSCOUT";
     P.setCharSpacing(1);
     if (forceMessageRestart) return;
 
@@ -5265,9 +5350,11 @@ void loop() {
         displayText += separatedStr;
         displayText += " ";
         displayText += arrow;
+        lastDisplayText = displayText;
         P.setCharSpacing(0);
       } else {
         displayText += glucoseDisplay + String(arrow);
+        lastDisplayText = displayText;
         P.setCharSpacing(1);
       }
 
@@ -5282,9 +5369,10 @@ void loop() {
       advanceDisplayMode();
       return;
     } else {
-      P.setTextAlignment(PA_CENTER);
-      P.setCharSpacing(0);
-      P.write(15);
+    P.setTextAlignment(PA_CENTER);
+    P.setCharSpacing(0);
+    P.write(15);
+    lastDisplayText = "NO NIGHTSCOUT";
       unsigned long errorStart = millis();
       while (millis() - errorStart < 2000) {
         if (displayMode != 4) return;
@@ -5299,6 +5387,7 @@ void loop() {
 
   // DATE Display Mode
   else if (displayMode == 5 && showDate) {
+    lastDisplayText = "DATE";
     if (forceMessageRestart) return;
 
     if (timeinfo.tm_year < 120 || timeinfo.tm_mday <= 0 || timeinfo.tm_mon < 0 || timeinfo.tm_mon > 11) {
@@ -5347,6 +5436,7 @@ void loop() {
 
     P.setTextAlignment(PA_CENTER);
     P.setCharSpacing(0);
+    lastDisplayText = dateString;
     P.print(dateString.c_str());
 
     if (millis() - lastSwitch > weatherDuration) {
@@ -5357,6 +5447,7 @@ void loop() {
 
   // --- Custom Message Display Mode (displayMode == 6) ---
   if (displayMode == 6) {
+    lastDisplayText = "CUSTOM MESSAGE";
     int totalPixelWidth = 0;
 
     if (forceMessageRestart) {
@@ -5448,6 +5539,7 @@ void loop() {
       // 1. Initial Centered Display
       P.setTextAlignment(PA_CENTER);
       P.setCharSpacing(1);
+      lastDisplayText = msg;
       P.print(msg.c_str());
 
       unsigned long displayUntil = millis() + durationMs;
@@ -5500,6 +5592,7 @@ void loop() {
     textEffect_t actualScrollDirection = getEffectiveScrollDirection(PA_SCROLL_LEFT, flipDisplay);
 
     P.displayScroll(msg.c_str(), PA_LEFT, actualScrollDirection, messageScrollSpeed);
+    lastDisplayText = msg;
 
     while (!P.displayAnimate()) {
       if (displayMode != 6) return;
@@ -5555,6 +5648,7 @@ char getPomodoroWorkIcon() {
 }
 
 void showTimerMode7() {
+  lastDisplayText = "TIMER";
   unsigned long now = millis();
   P.setCharSpacing(1);
 
@@ -5592,6 +5686,7 @@ void showTimerMode7() {
       int s = totalSec % 60;
       char buf[10];
       sprintf(buf, "%c %02d:%02d", '\xBF', m, s);
+      lastDisplayText = String(buf);
       P.setTextAlignment(PA_CENTER);
       P.print(buf);
       return;
@@ -5610,6 +5705,7 @@ void showTimerMode7() {
     } else {
       sprintf(buf, "%02d:%02d.%02d", m, s, cs);
     }
+    lastDisplayText = String(buf);
     P.setTextAlignment(PA_CENTER);
     P.print(buf);
     return;
@@ -5641,6 +5737,7 @@ void showTimerMode7() {
           if (h > 0) sprintf(buf, "%02d:%02d:%02d", h, m, s);
           else sprintf(buf, "%02d:%02d", m, s);
         }
+        lastDisplayText = String(buf);
 
         P.setTextAlignment(PA_CENTER);
         P.print(buf);
@@ -5661,6 +5758,7 @@ void showTimerMode7() {
         if (h > 0) sprintf(buf, "%02d:%02d:%02d", h, m, s);
         else sprintf(buf, "%02d:%02d", m, s);
       }
+      lastDisplayText = String(buf);
       P.setTextAlignment(PA_CENTER);
       P.print(buf);
       return;
@@ -5696,3 +5794,4 @@ void showTimerMode7() {
     else P.print("\x09");
   }
 }
+
