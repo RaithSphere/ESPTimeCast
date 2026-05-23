@@ -4848,6 +4848,8 @@ void loop() {
 
   // --- INDOOR Display Mode (AHT20 + BMP280) ---
   static bool indoorWasAvailable = false;
+  static bool showIndoorPressure = false;
+  static unsigned long lastIndoorSubSwitch = 0;
   if (displayMode == 8) {
     if (forceMessageRestart) return;
     updateIndoorReading();
@@ -4855,15 +4857,29 @@ void loop() {
     P.setTextAlignment(PA_CENTER);
 
     if (indoorAvailable) {
-      String indoorDisplay = "I" + formatIndoorTemperature();
-      if (indoorHumidity != -1) {
-        int cappedHumidity = (indoorHumidity > 99) ? 99 : indoorHumidity;
-        indoorDisplay += " " + String(cappedHumidity) + "%";
-      } else {
-        indoorDisplay += " " + String(tempSymbol);
+      if (prevDisplayMode != 8) {
+        showIndoorPressure = false;
+        lastIndoorSubSwitch = millis();
       }
-      if (!isnan(indoorPressureHpa)) {
-        indoorDisplay += " " + String((int)round(indoorPressureHpa)) + "hPa";
+      unsigned long indoorScreenInterval = max(1UL, weatherDuration / 2);
+      if (millis() - lastIndoorSubSwitch >= indoorScreenInterval) {
+        showIndoorPressure = !showIndoorPressure;
+        lastIndoorSubSwitch = millis();
+      }
+
+      String indoorDisplay;
+      if (!showIndoorPressure) {
+        indoorDisplay = "I" + formatIndoorTemperature();
+        if (indoorHumidity != -1) {
+          int cappedHumidity = (indoorHumidity > 99) ? 99 : indoorHumidity;
+          indoorDisplay += " " + String(cappedHumidity) + "%";
+        } else {
+          indoorDisplay += " " + String(tempSymbol);
+        }
+      } else if (!isnan(indoorPressureHpa)) {
+        indoorDisplay = String((int)round(indoorPressureHpa)) + " hPa";
+      } else {
+        indoorDisplay = "N/A hPa";
       }
 
       lastDisplayText = indoorDisplay;
