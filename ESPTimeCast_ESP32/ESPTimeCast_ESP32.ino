@@ -87,6 +87,7 @@ MD_Parola P = MD_Parola(HARDWARE_TYPE, L_DATA, L_CLK, L_CS, MAX_DEVICES);
 AsyncWebServer server(80);
 
 // --- Global Scroll Speed Settings ---
+const bool IP_AND_CLOCK_TRANSITION_SCROLLING_ENABLED = false;
 const int GENERAL_SCROLL_SPEED = 85;  // Default: Adjust this for Weather Description and Countdown Label (e.g., 50 for faster, 200 for slower)
 int IP_SCROLL_SPEED = 115;            // Default: Adjust this for the IP Address display (slower for readability)
 int messageScrollSpeed = 85;          // default fallback
@@ -755,8 +756,13 @@ void connectWiFi() {
       ipDisplayCount = 0;
       P.displayClear();
       P.setCharSpacing(1);
-      textEffect_t actualScrollDirection = getEffectiveScrollDirection(PA_SCROLL_LEFT, flipDisplay);
-      P.displayScroll(pendingIpToShow.c_str(), PA_CENTER, actualScrollDirection, IP_SCROLL_SPEED);
+      if (IP_AND_CLOCK_TRANSITION_SCROLLING_ENABLED) {
+        textEffect_t actualScrollDirection = getEffectiveScrollDirection(PA_SCROLL_LEFT, flipDisplay);
+        P.displayScroll(pendingIpToShow.c_str(), PA_CENTER, actualScrollDirection, IP_SCROLL_SPEED);
+      } else {
+        P.setTextAlignment(PA_CENTER);
+        P.print(pendingIpToShow.c_str());
+      }
       // --- END IP Display initiation ---
 
       animating = false;  // Exit the connection loop
@@ -4402,17 +4408,34 @@ void loop() {
 
   // --- IP Display ---
   if (showingIp) {
-    if (P.displayAnimate()) {
-      ipDisplayCount++;
-      if (ipDisplayCount < ipDisplayMax) {
-        textEffect_t actualScrollDirection = getEffectiveScrollDirection(PA_SCROLL_LEFT, flipDisplay);
-        P.displayScroll(pendingIpToShow.c_str(), PA_CENTER, actualScrollDirection, 120);
-      } else {
+    static unsigned long staticIpStartTime = 0;
+    if (!IP_AND_CLOCK_TRANSITION_SCROLLING_ENABLED) {
+      if (staticIpStartTime == 0) {
+        staticIpStartTime = millis();
+      }
+      if (millis() - staticIpStartTime >= 5000) {
+        staticIpStartTime = 0;
         showingIp = false;
         P.displayClear();
         delay(500);  // Blocking delay as in working copy
         displayMode = 0;
         lastSwitch = millis();
+      }
+    } else {
+      if (P.displayAnimate()) {
+        ipDisplayCount++;
+        if (ipDisplayCount < ipDisplayMax) {
+          textEffect_t actualScrollDirection = getEffectiveScrollDirection(PA_SCROLL_LEFT, flipDisplay);
+          P.displayScroll(pendingIpToShow.c_str(), PA_CENTER, actualScrollDirection, 120);
+        } else {
+          showingIp = false;
+          P.displayClear();
+          delay(500);  // Blocking delay as in working copy
+          displayMode = 0;
+          lastSwitch = millis();
+        }
+      } else {
+        staticIpStartTime = 0;
       }
     }
     yield();
@@ -4680,7 +4703,7 @@ void loop() {
         shouldScrollIn = true;  // scroll in when coming from custom message
       }
 
-      if (shouldScrollIn && !clockScrollDone) {
+      if (IP_AND_CLOCK_TRANSITION_SCROLLING_ENABLED && shouldScrollIn && !clockScrollDone) {
         textEffect_t inDir = getEffectiveScrollDirection(PA_SCROLL_LEFT, flipDisplay);
 
         P.displayText(
